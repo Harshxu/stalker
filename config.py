@@ -173,4 +173,5 @@ for d in [DATA_DIR, REPORTS_DIR, LOGS_DIR]:
 # ─────────────────────────────────────────────
 # DASHBOARD SERVER
 # ─────────────────────────────────────────────
-DASHBOARD_PORT = 8000
+DASHBOARD_PORT = int(os.getenv("PORT", 8000))
+
