@@ -23,6 +23,10 @@ import config
 import screener
 import db_manager
 import data_fetcher
+from data_fetcher import is_nse_holiday
+
+# Global Test/Sandbox Flag (bypasses holiday checks and mocks emails in testing mode)
+IS_TEST_MODE = False
 
 # ─────────────────────────────────────────────
 # Logging Setup
@@ -52,6 +56,10 @@ _today_symbols_picked = []
 def run_premarket_analysis():
     """Run full market analysis at 7 AM so picks are ready before market opens."""
     global _today_scan_result, _today_symbols_picked
+
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Today is a weekend or NSE trading holiday. Skipping pre-market analysis.")
+        return
 
     print("\n" + "="*60)
     print("  STALKER -- PRE-MARKET ANALYSIS (7:00 AM)")
@@ -97,6 +105,11 @@ def run_morning_scan():
     """Send the morning email at 8:30 AM using pre-computed picks from 7 AM analysis."""
     global _today_scan_result, _today_symbols_picked
 
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Today is a weekend or NSE trading holiday. Dispatching 'Market Closed Today' morning email...")
+        _send_market_closed_email()
+        return
+
     print("\n" + "="*60)
     print("  STALKER -- MORNING EMAIL DISPATCH (8:30 AM)")
     print(f"  {datetime.now().strftime('%A, %d %B %Y -- %I:%M %p')}")
@@ -137,6 +150,11 @@ def run_morning_scan():
 def record_open_prices():
     global _today_symbols_picked
 
+    # Strict holiday / closed day check
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Today is a weekend or NSE trading holiday. Skipping open prices.")
+        return
+
     if not _today_symbols_picked:
         # Load from DB if morning scan not run in this session
         today_picks = db_manager.get_today_picks()
@@ -148,7 +166,11 @@ def record_open_prices():
         return
 
     logger.info(f"Recording open prices for {len(_today_symbols_picked)} stocks...")
-    prices = data_fetcher.fetch_open_prices(_today_symbols_picked)
+    prices = data_fetcher.fetch_open_prices(_today_symbols_picked, allow_historical=IS_TEST_MODE)
+    if not prices:
+        logger.info("No open prices retrieved (Market is closed today).")
+        return
+
     db_manager.save_open_prices(prices)
 
     # Update dashboard file
@@ -166,6 +188,11 @@ def record_open_prices():
 def record_close_prices():
     global _today_symbols_picked
 
+    # Strict holiday / closed day check
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Today is a weekend or NSE trading holiday. Skipping close prices.")
+        return
+
     if not _today_symbols_picked:
         today_picks = db_manager.get_today_picks()
         if today_picks:
@@ -176,7 +203,11 @@ def record_close_prices():
         return
 
     logger.info(f"Recording close prices for {len(_today_symbols_picked)} stocks...")
-    prices = data_fetcher.fetch_close_prices(_today_symbols_picked)
+    prices = data_fetcher.fetch_close_prices(_today_symbols_picked, allow_historical=IS_TEST_MODE)
+    if not prices:
+        logger.info("No close prices retrieved (Market is closed today).")
+        return
+
     db_manager.save_close_prices(prices)
 
     close_path = os.path.join(config.DATA_DIR, "close_prices.json")
@@ -193,6 +224,11 @@ def record_close_prices():
 def generate_eod_report():
     logger.info("Generating EOD report...")
 
+    # Strict holiday / closed day check
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Today is a weekend or NSE trading holiday. Skipping EOD report generation (silent evening rule).")
+        return
+
     today = str(date.today())
     today_picks = db_manager.get_today_picks()
     prices = db_manager.get_prices_for_date(today)
@@ -205,6 +241,11 @@ def generate_eod_report():
     picks       = today_picks.get("picks", [])
     open_prices = prices.get("open", {})
     close_prices = prices.get("close", {})
+
+    # Prevent calculating/sending fake data if prices are completely missing
+    if (not open_prices or not close_prices) and not IS_TEST_MODE:
+        logger.warning("Missing open or close price data for today. Skipping EOD report to avoid sending unverified details.")
+        return
 
     # Build P&L per stock
     pnl_results = []
@@ -252,6 +293,7 @@ def generate_eod_report():
         "performance": perf,
         "market":      today_picks.get("market_trend"),
         "generated_at": datetime.now().isoformat(),
+        "is_test":     IS_TEST_MODE,
     }
 
     eod_path = os.path.join(config.DATA_DIR, "eod_report.json")
@@ -273,6 +315,17 @@ def generate_eod_report():
 
 def _send_via_brevo(subject: str, html_body: str) -> bool:
     """Send an email using Brevo REST API over HTTPS."""
+    if IS_TEST_MODE:
+        logger.info(f"[TEST_MODE] Real email send bypassed to avoid disturbing users. Subject: {subject}")
+        preview_path = os.path.join(config.REPORTS_DIR, "email_preview.html")
+        try:
+            with open(preview_path, "w", encoding="utf-8") as f:
+                f.write(html_body)
+            logger.info(f"[TEST_MODE] Preview saved locally at: {preview_path}")
+        except Exception as e:
+            logger.error(f"[TEST_MODE] Failed to save email preview: {e}")
+        return True
+
     api_key = os.getenv("BREVO_API_KEY", "")
     mail_to = os.getenv("FORMSUBMIT_TO", "")
     mail_from = os.getenv("FORMSUBMIT_TO", "")
@@ -335,11 +388,11 @@ def _send_morning_email(scan_result: Dict):
             action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb" if action == "WATCH" else "#fef2f2"
             
             name = p.get('name', p.get('symbol', ''))
-            price = p.get('current_price', 0)
-            target = p.get('target_2', 0)
-            stop_loss = p.get('stop_loss', 0)
-            risk = p.get('risk_profile', 'Medium')
-            score = p.get('total_score', 0)
+            price = p.get('current_price') if p.get('current_price') is not None else 0
+            target = p.get('target_2') if p.get('target_2') is not None else 0
+            stop_loss = p.get('stop_loss') if p.get('stop_loss') is not None else 0
+            risk = p.get('risk_profile') if p.get('risk_profile') is not None else 'Medium'
+            score = p.get('total_score') if p.get('total_score') is not None else 0
             
             rows_html += f"""
             <tr style="border-bottom: 1px solid #e5e7eb;">
@@ -422,6 +475,44 @@ def _send_morning_email(scan_result: Dict):
         logger.error(f"Morning email failed to build: {e}")
 
 
+def _send_market_closed_email():
+    """Send a friendly morning email stating that the market is closed today."""
+    date_str = datetime.now().strftime('%A, %d %B %Y')
+    subject = f"🔔 STALKER Info — Market Closed Today ({date_str})"
+    
+    html_body = f"""
+    <html>
+    <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 35px 24px; text-align: center; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">🔔 MARKET CLOSED TODAY</h1>
+                <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; font-weight: 500;">STALKER Market Analyzer</p>
+            </div>
+            
+            <!-- Info Section -->
+            <div style="padding: 30px 24px; text-align: center; background-color: #ffffff;">
+                <div style="font-size: 48px; margin-bottom: 20px;">☕</div>
+                <h3 style="margin: 0 0 10px 0; color: #1e3a8a; font-weight: 700; font-size: 20px;">Market is Closed Today</h3>
+                <p style="font-size: 15px; color: #4b5563; line-height: 1.6; margin: 0 0 20px 0;">
+                    Today, <strong>{date_str}</strong>, is a stock market holiday / weekend. No trading picks will be generated, and no EOD reports will be sent.
+                </p>
+                <div style="display: inline-block; padding: 10px 20px; background-color: #eff6ff; border-radius: 8px; font-size: 14px; color: #1e40af; font-weight: bold;">
+                    Have a wonderful day and enjoy your time off!
+                </div>
+            </div>
+            
+            <!-- Footer -->
+            <div style="background-color: #f9fafb; padding: 20px; text-align: center; border-top: 1px solid #f3f4f6; font-size: 12px; color: #9ca3af;">
+                <p style="margin: 0;">Sent automatically by STALKER Server.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    _send_via_brevo(subject, html_body)
+
+
 def _print_picks_summary(result: Dict):
     """Print clean summary to console."""
     picks  = result.get("top_picks", [])
@@ -453,15 +544,17 @@ def _send_email_report(eod_data: Dict):
     """Send EOD report via Brevo REST API over HTTPS."""
     try:
         date_str  = eod_data.get("date", "today")
-        perf      = eod_data.get("performance", {})
-        win_rate  = perf.get("win_rate", 0)
-        avg_pnl   = perf.get("avg_pnl", 0)
-        total_picks = perf.get("total_trades", 0)
+        perf      = eod_data.get("performance") or {}
+        win_rate  = perf.get("win_rate") if perf.get("win_rate") is not None else 0.0
+        avg_pnl   = perf.get("avg_pnl") if perf.get("avg_pnl") is not None else 0.0
+        total_picks = perf.get("total_trades") if perf.get("total_trades") is not None else 0
         picks     = eod_data.get("picks", [])
         wins      = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
         losses    = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
         
-        subject = f"📊 STALKER EOD Report — {date_str} | Win Rate: {win_rate:.1f}% | W:{wins} L:{losses}"
+        is_test = eod_data.get("is_test", False)
+        subject_prefix = "⚠️ [TEST / SIMULATED] " if is_test else ""
+        subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | Win Rate: {win_rate:.1f}% | W:{wins} L:{losses}"
         
         rows_html = ""
         for i, p in enumerate(picks, 1):
@@ -470,12 +563,12 @@ def _send_email_report(eod_data: Dict):
             action_color = "#16a34a" if action == "BUY" else "#d97706"
             action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
             
-            open_p = p.get("open", 0)
-            close_p = p.get("close", 0)
-            high_p = p.get("high", 0) or 0
-            low_p = p.get("low", 0) or 0
-            target_p = p.get("target", 0) or 0
-            sl_p = p.get("stop_loss", 0) or 0
+            open_p = p.get("open") if p.get("open") is not None else 0.0
+            close_p = p.get("close") if p.get("close") is not None else 0.0
+            high_p = p.get("high") if p.get("high") is not None else 0.0
+            low_p = p.get("low") if p.get("low") is not None else 0.0
+            target_p = p.get("target") if p.get("target") is not None else 0.0
+            sl_p = p.get("stop_loss") if p.get("stop_loss") is not None else 0.0
             
             pnl = p.get("pnl_pct")
             pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
@@ -522,6 +615,14 @@ def _send_email_report(eod_data: Dict):
             </tr>
             """
             
+        test_banner_html = ""
+        if is_test:
+            test_banner_html = """
+            <div style="background-color: #fef3c7; border-left: 4px solid #d97706; padding: 12px 16px; margin: 15px 24px; border-radius: 4px; font-size: 13px; color: #92400e; text-align: left;">
+                <strong>⚠️ Sandbox Test Mode:</strong> Today's market is closed. This report contains simulated data based on the latest available trading day's prices for testing purposes. Real database records have not been altered.
+            </div>
+            """
+
         html_body = f"""
         <html>
         <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
@@ -531,6 +632,8 @@ def _send_email_report(eod_data: Dict):
                     <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">📊 END OF DAY REPORT</h1>
                     <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; font-weight: 500;">Performance Audit & Trades Summary</p>
                 </div>
+                
+                {test_banner_html}
                 
                 <!-- Info Section -->
                 <div style="padding: 24px; background-color: #ffffff;">

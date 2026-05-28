@@ -1,241 +1,315 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>STALKER — Live Stock Analyzer</title>
-  <meta name="description" content="Live NSE India stock picks with real-time price updates, P&L tracking, and AI-powered signals." />
+  <meta name="description"
+    content="Live NSE India stock picks with real-time price updates, P&L tracking, and AI-powered signals." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
+    rel="stylesheet" />
   <link rel="stylesheet" href="style.css?v=4" />
 </head>
+
 <body>
 
-<!-- ══ LIVE TICKER BAR (top) ══════════════════ -->
-<div class="ticker-wrap" id="ticker-wrap">
-  <div class="ticker-label">LIVE</div>
-  <div class="ticker-track" id="ticker-track">
-    <div class="ticker-inner" id="ticker-inner">
-      <span class="ticker-loading">Fetching live prices...</span>
-    </div>
-  </div>
-</div>
-
-<!-- ══ SIDEBAR ════════════════════════════════ -->
-<div class="layout">
-<nav class="sidebar" id="sidebar">
-  <div class="sidebar-logo">
-    <div class="logo-icon">📈</div>
-    <div class="logo-text">
-      <span class="logo-main">STALKER</span>
-      <span class="logo-sub">Live Market Intelligence</span>
+  <!-- ══ WELCOME SPLASH SCREEN ══════════════════ -->
+  <div id="welcome-screen" class="welcome-screen">
+    <div class="welcome-card">
+      <div class="welcome-logo">🚀</div>
+      <h2 class="welcome-brand">
+        <span class="letter">S</span>
+        <span class="letter">T</span>
+        <span class="letter">A</span>
+        <span class="letter">L</span>
+        <span class="letter">K</span>
+        <span class="letter">E</span>
+        <span class="letter">R</span>
+      </h2>
+      <div class="welcome-divider"></div>
+      <p class="welcome-quote">"Master your time, conquer your goals"</p>
     </div>
   </div>
 
-  <div class="nav-section-label">MAIN</div>
-  <a href="#" class="nav-link active" data-page="today" id="nav-today">
-    <span class="nav-icon">🎯</span><span>Today's Picks</span>
-    <span class="nav-badge" id="picks-badge">0</span>
-  </a>
-  <a href="#" class="nav-link" data-page="live" id="nav-live">
-    <span class="nav-icon">⚡</span><span>Live Prices</span>
-    <span class="live-dot"></span>
-  </a>
-
-  <a href="#" class="nav-link" data-page="automations" id="nav-automations">
-    <span class="nav-icon">⏰</span><span>Automations</span>
-    <span class="auto-dot" id="auto-dot"></span>
-  </a>
-
-  <a href="#" class="nav-link" data-page="howto" id="nav-howto">
-    <span class="nav-icon">💡</span><span>How to Use</span>
-  </a>
-
-  <div class="sidebar-footer">
-    <div class="market-status" id="market-status-badge">
-      <div class="status-dot" id="status-dot"></div>
-      <span id="market-status-text">Checking...</span>
-    </div>
-    <div class="last-updated" id="last-updated-text">—</div>
-    <div class="refresh-countdown" id="refresh-countdown"></div>
-  </div>
-</nav>
-
-<!-- ══ MAIN CONTENT ════════════════════════════ -->
-<main class="main-content" id="main-content">
-
-  <!-- ── TODAY'S PICKS ── -->
-  <div class="page active" id="page-today">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Today's Picks</h1>
-        <p class="page-subtitle" id="scan-meta">Loading scan results...</p>
-      </div>
-      <div class="header-actions">
-        <div class="market-pill" id="market-pill">
-          <span id="market-icon">🌐</span>
-          <span id="market-label">Market</span>
-        </div>
-        <button class="btn-refresh" id="btn-refresh" onclick="manualRefresh()">
-          🔄 Refresh
-        </button>
-      </div>
-    </div>
-
-    <!-- Market Summary Bar -->
-    <div class="market-bar">
-      <div class="market-card">
-        <div class="mc-label">Market Mood</div>
-        <div class="mc-value" id="mood-val">—</div>
-      </div>
-      <div class="market-card">
-        <div class="mc-label">Stocks Scanned</div>
-        <div class="mc-value" id="scanned-val">—</div>
-        <div class="mc-trend" id="qualified-val">—</div>
-      </div>
-      <div class="market-card">
-        <div class="mc-label">Picks Today</div>
-        <div class="mc-value" id="picks-count-val">—</div>
-      </div>
-      <div class="market-card">
-        <div class="mc-label">Live P&L (Avg)</div>
-        <div class="mc-value mono" id="avg-live-pnl">—</div>
-      </div>
-    </div>
-
-    <!-- Sector Heatmap -->
-    <div class="section-header">
-      <h2 class="section-title">Sector Strength</h2>
-    </div>
-    <div class="sector-heatmap" id="sector-heatmap">
-      <div class="sector-loading">Loading...</div>
-    </div>
-
-    <!-- Loss Alert -->
-    <div class="alert-banner danger hidden" id="loss-alert">
-      ⚠️ <strong>Stop Trading Today</strong> — Daily loss limit reached. Protect your capital.
-    </div>
-
-    <!-- Picks Grid -->
-    <div class="section-header">
-      <h2 class="section-title">Top Picks <span class="title-badge" id="picks-total-badge">0</span></h2>
-      <div class="filter-tabs">
-        <button class="filter-tab active" onclick="filterPicks('all',this)">All</button>
-        <button class="filter-tab" onclick="filterPicks('BUY',this)">🟢 Buy</button>
-        <button class="filter-tab" onclick="filterPicks('WATCH',this)">🟡 Watch</button>
-      </div>
-    </div>
-    <div class="picks-grid" id="picks-grid">
-      <div class="loading-spinner"><div class="spinner"></div><p>Analysing markets...</p></div>
-    </div>
-  </div>
-
-  <!-- ── LIVE PRICES PAGE ── -->
-  <div class="page hidden" id="page-live">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">Live Prices <span class="live-badge-title">LIVE</span></h1>
-        <p class="page-subtitle" id="live-updated-at">Updating every 20 seconds</p>
-      </div>
-    </div>
-    <div class="live-table-wrap">
-      <table class="live-table" id="live-table">
-        <thead>
-          <tr>
-            <th>Stock</th>
-            <th>Signal</th>
-            <th class="right">Live Price</th>
-            <th class="right">Change</th>
-            <th class="right">Entry Price</th>
-            <th class="right">Live P&L</th>
-            <th class="right">Day High</th>
-            <th class="right">Day Low</th>
-          </tr>
-        </thead>
-        <tbody id="live-table-body">
-          <tr><td colspan="8" class="table-empty">Waiting for live data...</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-
-
-  <!-- ── HOW TO USE ── -->
-  <div class="page hidden" id="page-howto">
-    <div class="page-header"><div><h1 class="page-title">How to Use STALKER</h1><p class="page-subtitle">Simple guide — no finance knowledge needed</p></div></div>
-    <div class="howto-grid">
-      <div class="howto-card"><div class="howto-step">1</div><span class="howto-icon">🌅</span><h3>Check before 9:15 AM</h3><p>Open this dashboard every morning. STALKER scans at 8:30 AM and shows the best stocks for today.</p></div>
-      <div class="howto-card"><div class="howto-step">2</div><span class="howto-icon">🟢</span><h3>Look for GREEN "BUY" stocks</h3><p>Only consider BUY signals. Yellow WATCH means wait. Red AVOID means skip.</p></div>
-      <div class="howto-card"><div class="howto-step">3</div><span class="howto-icon">⚡</span><h3>Watch the Live Price</h3><p>The Live Prices tab shows real-time updates every 20 seconds. The P&L shows your profit/loss from the morning entry.</p></div>
-      <div class="howto-card"><div class="howto-step">4</div><span class="howto-icon">📌</span><h3>Always Use Stop Loss</h3><p>Set your stop loss at the price shown. Never skip it. This prevents the big losses.</p></div>
-      <div class="howto-card"><div class="howto-step">5</div><span class="howto-icon">🎯</span><h3>Exit at Target</h3><p>When stock hits Target 1 or Target 2, take profit. Don't get greedy.</p></div>
-      <div class="howto-card"><div class="howto-step">6</div><span class="howto-icon">⛔</span><h3>Stop After 2 Losses</h3><p>2 losing trades in one day? Stop. The system shows a warning. Protect your capital.</p></div>
-    </div>
-    <div class="signal-legend">
-      <h3>Understanding Signals</h3>
-      <div class="legend-grid">
-        <div class="legend-item"><span class="action-badge green">BUY</span><span>Strong setup — all conditions met.</span></div>
-        <div class="legend-item"><span class="action-badge yellow">WATCH</span><span>Good stock but setup not ideal today.</span></div>
-        <div class="legend-item"><span class="action-badge red">AVOID</span><span>Conditions not right. Do not trade.</span></div>
-        <div class="legend-item"><span class="risk-label low">Low Risk</span><span>Strong trend + confirmed volume.</span></div>
-        <div class="legend-item"><span class="risk-label med">Medium Risk</span><span>Good setup, one condition missing.</span></div>
-        <div class="legend-item"><span class="risk-label high">High Risk</span><span>Speculative — experienced traders only.</span></div>
+  <!-- ══ LIVE TICKER BAR (top) ══════════════════ -->
+  <div class="ticker-wrap" id="ticker-wrap">
+    <div class="ticker-label">LIVE</div>
+    <div class="ticker-track" id="ticker-track">
+      <div class="ticker-inner" id="ticker-inner">
+        <span class="ticker-loading">Fetching live prices...</span>
       </div>
     </div>
   </div>
 
-
-  <!-- ── AUTOMATIONS PAGE ── -->
-  <div class="page hidden" id="page-automations">
-    <div class="page-header">
-      <div>
-        <h1 class="page-title">⏰ Automation Center</h1>
-        <p class="page-subtitle" id="auto-subtitle">Daily schedule • task status • system health</p>
-      </div>
-      <div class="header-actions">
-        <div class="ist-clock-display">
-          <div class="ist-clock-label">IST</div>
-          <div class="ist-clock-value" id="ist-clock">--:--:--</div>
+  <!-- ══ SIDEBAR ════════════════════════════════ -->
+  <div class="layout">
+    <nav class="sidebar" id="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">📈</div>
+        <div class="logo-text">
+          <span class="logo-main">STALKER</span>
+          <span class="logo-sub">Live Market Intelligence</span>
         </div>
       </div>
-    </div>
-    <div id="automation-content">
-      <div class="loading-spinner"><div class="spinner"></div><p>Loading schedule...</p></div>
+
+      <div class="nav-section-label">MAIN</div>
+      <a href="#" class="nav-link active" data-page="today" id="nav-today">
+        <span class="nav-icon">🎯</span><span>Today's Picks</span>
+        <span class="nav-badge" id="picks-badge">0</span>
+      </a>
+      <a href="#" class="nav-link" data-page="live" id="nav-live">
+        <span class="nav-icon">⚡</span><span>Live Prices</span>
+        <span class="live-dot"></span>
+      </a>
+
+      <a href="#" class="nav-link" data-page="automations" id="nav-automations">
+        <span class="nav-icon">⏰</span><span>Automations</span>
+        <span class="auto-dot" id="auto-dot"></span>
+      </a>
+
+      <a href="#" class="nav-link" data-page="howto" id="nav-howto">
+        <span class="nav-icon">💡</span><span>How to Use</span>
+      </a>
+
+      <div class="sidebar-footer">
+        <div class="market-status" id="market-status-badge">
+          <div class="status-dot" id="status-dot"></div>
+          <span id="market-status-text">Checking...</span>
+        </div>
+        <div class="last-updated" id="last-updated-text">—</div>
+        <div class="refresh-countdown" id="refresh-countdown"></div>
+      </div>
+    </nav>
+
+    <!-- ══ MAIN CONTENT ════════════════════════════ -->
+    <main class="main-content" id="main-content">
+
+      <!-- ── TODAY'S PICKS ── -->
+      <div class="page active" id="page-today">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Today's Picks</h1>
+            <p class="page-subtitle" id="scan-meta">Loading scan results...</p>
+          </div>
+          <div class="header-actions">
+            <div class="market-pill" id="market-pill">
+              <span id="market-icon">🌐</span>
+              <span id="market-label">Market</span>
+            </div>
+            <button class="btn-refresh" id="btn-refresh" onclick="manualRefresh()">
+              🔄 Refresh
+            </button>
+          </div>
+        </div>
+
+        <!-- Market Summary Bar -->
+        <div class="market-bar">
+          <div class="market-card">
+            <div class="mc-label">Market Mood</div>
+            <div class="mc-value" id="mood-val">—</div>
+          </div>
+          <div class="market-card">
+            <div class="mc-label">Stocks Scanned</div>
+            <div class="mc-value" id="scanned-val">—</div>
+            <div class="mc-trend" id="qualified-val">—</div>
+          </div>
+          <div class="market-card">
+            <div class="mc-label">Picks Today</div>
+            <div class="mc-value" id="picks-count-val">—</div>
+          </div>
+          <div class="market-card">
+            <div class="mc-label">Live P&L (Avg)</div>
+            <div class="mc-value mono" id="avg-live-pnl">—</div>
+          </div>
+        </div>
+
+        <!-- Sector Heatmap -->
+        <div class="section-header">
+          <h2 class="section-title">Sector Strength</h2>
+        </div>
+        <div class="sector-heatmap" id="sector-heatmap">
+          <div class="sector-loading">Loading...</div>
+        </div>
+
+        <!-- Loss Alert -->
+        <div class="alert-banner danger hidden" id="loss-alert">
+          ⚠️ <strong>Stop Trading Today</strong> — Daily loss limit reached. Protect your capital.
+        </div>
+
+        <!-- Picks Grid -->
+        <div class="section-header">
+          <h2 class="section-title">Top Picks <span class="title-badge" id="picks-total-badge">0</span></h2>
+          <div class="filter-tabs">
+            <button class="filter-tab active" onclick="filterPicks('all',this)">All</button>
+            <button class="filter-tab" onclick="filterPicks('BUY',this)">🟢 Buy</button>
+            <button class="filter-tab" onclick="filterPicks('WATCH',this)">🟡 Watch</button>
+          </div>
+        </div>
+        <div class="picks-grid" id="picks-grid">
+          <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p>Analysing markets...</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── LIVE PRICES PAGE ── -->
+      <div class="page hidden" id="page-live">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Live Prices <span class="live-badge-title">LIVE</span></h1>
+            <p class="page-subtitle" id="live-updated-at">Updating every 20 seconds</p>
+          </div>
+        </div>
+        <div class="live-table-wrap">
+          <table class="live-table" id="live-table">
+            <thead>
+              <tr>
+                <th>Stock</th>
+                <th>Signal</th>
+                <th class="right">Live Price</th>
+                <th class="right">Change</th>
+                <th class="right">Entry Price</th>
+                <th class="right">Live P&L</th>
+                <th class="right">Day High</th>
+                <th class="right">Day Low</th>
+              </tr>
+            </thead>
+            <tbody id="live-table-body">
+              <tr>
+                <td colspan="8" class="table-empty">Waiting for live data...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+
+
+      <!-- ── HOW TO USE ── -->
+      <div class="page hidden" id="page-howto">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">How to Use STALKER</h1>
+            <p class="page-subtitle">Simple guide — no finance knowledge needed</p>
+          </div>
+        </div>
+        <div class="howto-grid">
+          <div class="howto-card">
+            <div class="howto-step">1</div><span class="howto-icon">🌅</span>
+            <h3>Check before 9:15 AM</h3>
+            <p>Open this dashboard every morning. STALKER scans at 8:30 AM and shows the best stocks for today.</p>
+          </div>
+          <div class="howto-card">
+            <div class="howto-step">2</div><span class="howto-icon">🟢</span>
+            <h3>Look for GREEN "BUY" stocks</h3>
+            <p>Only consider BUY signals. Yellow WATCH means wait. Red AVOID means skip.</p>
+          </div>
+          <div class="howto-card">
+            <div class="howto-step">3</div><span class="howto-icon">⚡</span>
+            <h3>Watch the Live Price</h3>
+            <p>The Live Prices tab shows real-time updates every 20 seconds. The P&L shows your profit/loss from the
+              morning entry.</p>
+          </div>
+          <div class="howto-card">
+            <div class="howto-step">4</div><span class="howto-icon">📌</span>
+            <h3>Always Use Stop Loss</h3>
+            <p>Set your stop loss at the price shown. Never skip it. This prevents the big losses.</p>
+          </div>
+          <div class="howto-card">
+            <div class="howto-step">5</div><span class="howto-icon">🎯</span>
+            <h3>Exit at Target</h3>
+            <p>When stock hits Target 1 or Target 2, take profit. Don't get greedy.</p>
+          </div>
+          <div class="howto-card">
+            <div class="howto-step">6</div><span class="howto-icon">⛔</span>
+            <h3>Stop After 2 Losses</h3>
+            <p>2 losing trades in one day? Stop. The system shows a warning. Protect your capital.</p>
+          </div>
+        </div>
+        <div class="signal-legend">
+          <h3>Understanding Signals</h3>
+          <div class="legend-grid">
+            <div class="legend-item"><span class="action-badge green">BUY</span><span>Strong setup — all conditions
+                met.</span></div>
+            <div class="legend-item"><span class="action-badge yellow">WATCH</span><span>Good stock but setup not ideal
+                today.</span></div>
+            <div class="legend-item"><span class="action-badge red">AVOID</span><span>Conditions not right. Do not
+                trade.</span></div>
+            <div class="legend-item"><span class="risk-label low">Low Risk</span><span>Strong trend + confirmed
+                volume.</span></div>
+            <div class="legend-item"><span class="risk-label med">Medium Risk</span><span>Good setup, one condition
+                missing.</span></div>
+            <div class="legend-item"><span class="risk-label high">High Risk</span><span>Speculative — experienced
+                traders only.</span></div>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- ── AUTOMATIONS PAGE ── -->
+      <div class="page hidden" id="page-automations">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">⏰ Automation Center</h1>
+            <p class="page-subtitle" id="auto-subtitle">Daily schedule • task status • system health</p>
+          </div>
+          <div class="header-actions">
+            <div class="ist-clock-display">
+              <div class="ist-clock-label">IST</div>
+              <div class="ist-clock-value" id="ist-clock">--:--:--</div>
+            </div>
+          </div>
+        </div>
+        <div id="automation-content">
+          <div class="loading-spinner">
+            <div class="spinner"></div>
+            <p>Loading schedule...</p>
+          </div>
+        </div>
+      </div>
+
+    </main>
+  </div><!-- /layout -->
+
+  <!-- ══ STOCK DETAIL MODAL ══════════════════════ -->
+  <div class="modal-overlay hidden" id="modal-overlay" onclick="closeModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="closeModal()">✕</button>
+      <div id="modal-content"></div>
     </div>
   </div>
 
-</main>
-</div><!-- /layout -->
-
-<!-- ══ STOCK DETAIL MODAL ══════════════════════ -->
-<div class="modal-overlay hidden" id="modal-overlay" onclick="closeModal()">
-  <div class="modal" onclick="event.stopPropagation()">
-    <button class="modal-close" onclick="closeModal()">✕</button>
-    <div id="modal-content"></div>
-  </div>
-</div>
-
-<!-- ══ NO DATA OVERLAY ════════════════════════ -->
-<div class="no-data-overlay hidden" id="no-data-overlay">
-  <div class="no-data-card animate-pulse">
-    <div class="no-data-icon spinner-sun">🌅</div>
-    <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 10px;">Auto-Generating Today's Picks</h2>
-    <p style="max-width: 420px; margin: 10px auto; line-height: 1.6; color: var(--text-secondary); font-size: 14px;">
-      STALKER is running a pre-market 6-layer AI screening analysis across high-liquidity NSE stocks to identify today's high-probability opportunities.
-    </p>
-    <div style="margin: 24px auto; width: 80%; background: var(--bg-elevated); height: 6px; border-radius: 3px; overflow: hidden; border: 1px solid var(--border);">
-      <div class="animated-loading-bar" style="background: var(--buy-color); height: 100%; width: 50%; border-radius: 3px;"></div>
-    </div>
-    <div class="no-data-steps" style="border-top: 1px solid var(--border); padding-top: 15px; text-align: center; display: block;">
-      <span style="font-size: 13px; color: var(--buy-color); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; display: block;">
-        ⏳ Scan in progress...
-      </span>
-      <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">This takes about 45 seconds. Page will update automatically.</p>
+  <!-- ══ NO DATA OVERLAY ════════════════════════ -->
+  <div class="no-data-overlay hidden" id="no-data-overlay">
+    <div class="no-data-card animate-pulse">
+      <div class="no-data-icon spinner-sun">🌅</div>
+      <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 10px;">Auto-Generating Today's Picks</h2>
+      <p style="max-width: 420px; margin: 10px auto; line-height: 1.6; color: var(--text-secondary); font-size: 14px;">
+        STALKER is running a pre-market 6-layer AI screening analysis across high-liquidity NSE stocks to identify
+        today's high-probability opportunities.
+      </p>
+      <div
+        style="margin: 24px auto; width: 80%; background: var(--bg-elevated); height: 6px; border-radius: 3px; overflow: hidden; border: 1px solid var(--border);">
+        <div class="animated-loading-bar"
+          style="background: var(--buy-color); height: 100%; width: 50%; border-radius: 3px;"></div>
+      </div>
+      <div class="no-data-steps"
+        style="border-top: 1px solid var(--border); padding-top: 15px; text-align: center; display: block;">
+        <span
+          style="font-size: 13px; color: var(--buy-color); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; display: block;">
+          ⏳ Scan in progress...
+        </span>
+        <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">This takes about 45 seconds. Page will
+          update automatically.</p>
+      </div>
     </div>
   </div>
-</div>
 
-<script src="app.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
+
 </html>

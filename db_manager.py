@@ -364,3 +364,41 @@ def cleanup_old_data(days_to_keep: int = 10):
         logger.error(f"Error during MongoDB cleanup: {e}", exc_info=True)
         return False
 
+
+def delete_date_data(target_date: str, delete_picks: bool = False) -> bool:
+    """Delete all records for a specific date (used to clean up test data)."""
+    db = get_db()
+    if db is not None:
+        try:
+            db[config.MONGO_COLLECTION_PRICES].delete_many({"date": target_date})
+            db["eod_reports"].delete_many({"date": target_date})
+            if delete_picks:
+                db[config.MONGO_COLLECTION_PICKS].delete_many({"date": target_date})
+            logger.info(f"[DB] Test data cleared for {target_date}")
+        except Exception as e:
+            logger.error(f"Error clearing test data from MongoDB: {e}")
+            
+    # JSON fallback
+    for filename in ["price_history.json", "eod_reports_history.json"]:
+        path = _json_path(filename)
+        if os.path.exists(path):
+            try:
+                data = _read_json(filename)
+                filtered = [r for r in data if r.get("date") != target_date]
+                _write_json(filename, filtered)
+            except Exception as e:
+                logger.error(f"Error clearing JSON test data for {filename}: {e}")
+                
+    if delete_picks:
+        filename = "daily_picks.json"
+        path = _json_path(filename)
+        if os.path.exists(path):
+            try:
+                data = _read_json(filename)
+                filtered = [r for r in data if r.get("date") != target_date]
+                _write_json(filename, filtered)
+            except Exception as e:
+                logger.error(f"Error clearing JSON test data for {filename}: {e}")
+                
+    return True
+

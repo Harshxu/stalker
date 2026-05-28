@@ -26,7 +26,7 @@ from typing import Dict, List, Optional
 import yfinance as yf
 
 import config
-from data_fetcher import get_browser_session
+from data_fetcher import get_browser_session, is_nse_holiday
 import db_manager
 
 logger = logging.getLogger(__name__)
@@ -181,6 +181,23 @@ def _refresh_cache():
 
     while True:
         try:
+            # Check market hours (IST timezone)
+            from datetime import timezone, timedelta
+            IST_OFFSET = timedelta(hours=5, minutes=30)
+            now_ist    = datetime.now(timezone.utc) + IST_OFFSET
+            
+            # Check holiday / weekend
+            from data_fetcher import is_nse_holiday
+            is_closed = is_nse_holiday(now_ist.date())
+            
+            current_mins = now_ist.hour * 60 + now_ist.minute
+            is_outside_hours = (current_mins < 9*60+15 or current_mins > 16*60) # before 9:15 AM or after 4:00 PM IST
+            
+            if is_closed or is_outside_hours:
+                # Polling paused. Check again in 30 seconds.
+                time.sleep(30)
+                continue
+
             with _cache_lock:
                 symbols = list(_tracked_symbols)
 
@@ -254,6 +271,18 @@ def _run_background_scan_task():
 def api_picks() -> Dict:
     """Return today's scan picks from DB."""
     global _is_scanning
+    
+    # 🛑 weekend or NSE holiday check
+    if is_nse_holiday(date.today()):
+        return {
+            "_is_scanning": False,
+            "_has_today_picks": False,
+            "_market_closed": True,
+            "message": "Market is closed today. Have a wonderful day!",
+            "picks": [],
+            "top_picks": []
+        }
+
     today = str(date.today())
     data = db_manager.get_today_picks()
     if not data:
@@ -291,6 +320,15 @@ def api_picks() -> Dict:
 
 def api_live_prices() -> Dict:
     """Return live prices with P&L vs morning open."""
+    if is_nse_holiday(date.today()):
+        return {
+            "prices": {},
+            "count": 0,
+            "cache_age_sec": 0,
+            "fetched_at": datetime.now().isoformat(),
+            "_market_closed": True
+        }
+
     prices   = get_cached_prices()
     today    = str(date.today())
 

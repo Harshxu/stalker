@@ -32,6 +32,37 @@ def get_browser_session():
     return session
 
 
+def is_nse_holiday(dt: date) -> bool:
+    """
+    Check if a given date is a weekend or an official NSE trading holiday in 2026.
+    """
+    # Weekend check
+    if dt.weekday() in (5, 6):
+        return True
+        
+    # Official NSE Holidays for 2026
+    nse_holidays_2026 = {
+        date(2026, 1, 26),   # Republic Day
+        date(2026, 2, 16),   # Mahashivratri
+        date(2026, 3, 4),    # Holi
+        date(2026, 3, 20),   # Id-ul-Fitr (Ramzan Id)
+        date(2026, 4, 3),    # Good Friday
+        date(2026, 4, 14),   # Ambedkar Jayanti
+        date(2026, 5, 1),    # Maharashtra Day
+        date(2026, 5, 28),   # Bakri Id / Id-ul-Zuha
+        date(2026, 6, 25),   # Moharram
+        date(2026, 8, 15),   # Independence Day
+        date(2026, 9, 25),   # Eid-e-Milad
+        date(2026, 10, 2),   # Gandhi Jayanti
+        date(2026, 10, 22),  # Dussehra
+        date(2026, 11, 12),  # Diwali
+        date(2026, 11, 23),  # Guru Nanak Jayanti
+        date(2026, 12, 25),  # Christmas
+    }
+    
+    return dt in nse_holidays_2026
+
+
 # ─────────────────────────────────────────────
 # OHLCV Data Fetcher
 # ─────────────────────────────────────────────
@@ -297,43 +328,183 @@ def fetch_current_quote(symbol: str) -> Dict:
         return {"symbol": symbol, "timestamp": datetime.now().isoformat(), "current_price": None}
 
 
-def fetch_open_prices(symbols: List[str]) -> Dict[str, Dict]:
+def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dict[str, Dict]:
     """
     Capture opening prices for selected stocks at market open.
     Run this at 9:20 AM for stable open prices.
+    Uses bulk download to avoid rate limits, with sequential fallback.
     """
+    if not symbols:
+        return {}
+
+    # Strict holiday / closed day check
+    if is_nse_holiday(date.today()) and not allow_historical:
+        logger.warning(f"Today is a weekend or NSE trading holiday. Skipping open prices.")
+        return {}
+
     prices = {}
-    for symbol in symbols:
-        quote = fetch_current_quote(symbol)
-        prices[symbol] = quote
-        time.sleep(0.3)
-        logger.info(f"Open price for {symbol}: {quote.get('open')}")
+    logger.info(f"Recording open prices for {len(symbols)} stocks using bulk download...")
+    
+    try:
+        session = get_browser_session()
+        # Fetch 1d data for all symbols
+        df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        
+        if df.empty:
+            logger.warning("Bulk download returned empty DataFrame.")
+        else:
+            latest_date = df.index[-1].date()
+            if latest_date != date.today() and not allow_historical:
+                logger.warning(f"Downloaded prices belong to {latest_date}, but today is {date.today()} (Market Closed). Skipping.")
+                return {}
+
+            is_single = (len(symbols) == 1)
+            
+            for symbol in symbols:
+                try:
+                    if is_single:
+                        sym_df = df
+                    else:
+                        if symbol not in df.columns.levels[0]:
+                            continue
+                        sym_df = df[symbol]
+                    
+                    if sym_df.empty:
+                        continue
+                        
+                    latest_row = sym_df.iloc[-1]
+                    
+                    open_val = latest_row.get("Open")
+                    high_val = latest_row.get("High")
+                    low_val = latest_row.get("Low")
+                    close_val = latest_row.get("Close")
+                    volume_val = latest_row.get("Volume")
+                    
+                    if pd.isna(open_val) or open_val is None:
+                        continue
+                        
+                    prices[symbol] = {
+                        "symbol": symbol,
+                        "timestamp": datetime.now().isoformat(),
+                        "current_price": float(close_val) if not pd.isna(close_val) else float(open_val),
+                        "open": float(open_val),
+                        "high": float(high_val) if not pd.isna(high_val) else float(open_val),
+                        "low": float(low_val) if not pd.isna(low_val) else float(open_val),
+                        "volume": float(volume_val) if not pd.isna(volume_val) else 0.0,
+                    }
+                    logger.info(f"Bulk open price for {symbol}: {prices[symbol]['open']}")
+                except Exception as e:
+                    logger.debug(f"Failed to extract bulk open price for {symbol}: {e}")
+    except Exception as e:
+        logger.error(f"Bulk open download failed: {e}")
+        
+    # Fill in any missing symbols using the traditional sequential fallback
+    missing_symbols = [s for s in symbols if s not in prices]
+    if missing_symbols:
+        logger.info(f"Falling back to serial fetching for {len(missing_symbols)} missing stocks...")
+        for symbol in missing_symbols:
+            try:
+                quote = fetch_current_quote(symbol)
+                prices[symbol] = quote
+                logger.info(f"Open price for {symbol}: {quote.get('open')}")
+            except Exception as e:
+                logger.error(f"Serial fetch failed for {symbol}: {e}")
+            time.sleep(0.3)
+            
     return prices
 
 
-def fetch_close_prices(symbols: List[str]) -> Dict[str, Dict]:
+def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Dict[str, Dict]:
     """
     Capture closing prices at end of trading day (3:30 PM).
     Run this at 3:35 PM.
+    Uses bulk download to avoid rate limits, with sequential fallback.
     """
-    prices = {}
-    for symbol in symbols:
-        try:
-            quote = fetch_current_quote(symbol)
-            if quote and quote.get("current_price"):
-                prices[symbol] = {
-                    "symbol": symbol,
-                    "timestamp": quote.get("timestamp"),
-                    "close": float(quote.get("current_price")),
-                    "high": float(quote.get("high") or quote.get("current_price")),
-                    "low": float(quote.get("low") or quote.get("current_price")),
-                    "open": float(quote.get("open") or quote.get("current_price")),
-                    "volume": float(quote.get("volume") or 0),
-                }
-        except Exception as e:
-            logger.error(f"Error fetching close for {symbol}: {e}")
-        time.sleep(0.3)
+    if not symbols:
+        return {}
 
+    # Strict holiday / closed day check
+    if is_nse_holiday(date.today()) and not allow_historical:
+        logger.warning(f"Today is a weekend or NSE trading holiday. Skipping close prices.")
+        return {}
+
+    prices = {}
+    logger.info(f"Recording close prices for {len(symbols)} stocks using bulk download...")
+    
+    try:
+        session = get_browser_session()
+        df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        
+        if df.empty:
+            logger.warning("Bulk download returned empty DataFrame.")
+        else:
+            latest_date = df.index[-1].date()
+            if latest_date != date.today() and not allow_historical:
+                logger.warning(f"Downloaded prices belong to {latest_date}, but today is {date.today()} (Market Closed). Skipping.")
+                return {}
+
+            is_single = (len(symbols) == 1)
+            
+            for symbol in symbols:
+                try:
+                    if is_single:
+                        sym_df = df
+                    else:
+                        if symbol not in df.columns.levels[0]:
+                            continue
+                        sym_df = df[symbol]
+                    
+                    if sym_df.empty:
+                        continue
+                        
+                    latest_row = sym_df.iloc[-1]
+                    
+                    open_val = latest_row.get("Open")
+                    high_val = latest_row.get("High")
+                    low_val = latest_row.get("Low")
+                    close_val = latest_row.get("Close")
+                    volume_val = latest_row.get("Volume")
+                    
+                    if pd.isna(close_val) or close_val is None:
+                        continue
+                        
+                    prices[symbol] = {
+                        "symbol": symbol,
+                        "timestamp": datetime.now().isoformat(),
+                        "close": float(close_val),
+                        "high": float(high_val) if not pd.isna(high_val) else float(close_val),
+                        "low": float(low_val) if not pd.isna(low_val) else float(close_val),
+                        "open": float(open_val) if not pd.isna(open_val) else float(close_val),
+                        "volume": float(volume_val) if not pd.isna(volume_val) else 0.0,
+                    }
+                    logger.info(f"Bulk close price for {symbol}: {prices[symbol]['close']}")
+                except Exception as e:
+                    logger.debug(f"Failed to extract bulk close price for {symbol}: {e}")
+    except Exception as e:
+        logger.error(f"Bulk close download failed: {e}")
+        
+    # Fill in any missing symbols using the traditional sequential fallback
+    missing_symbols = [s for s in symbols if s not in prices]
+    if missing_symbols:
+        logger.info(f"Falling back to serial fetching for {len(missing_symbols)} missing stocks...")
+        for symbol in missing_symbols:
+            try:
+                quote = fetch_current_quote(symbol)
+                if quote and quote.get("current_price"):
+                    prices[symbol] = {
+                        "symbol": symbol,
+                        "timestamp": quote.get("timestamp"),
+                        "close": float(quote.get("current_price")),
+                        "high": float(quote.get("high") or quote.get("current_price")),
+                        "low": float(quote.get("low") or quote.get("current_price")),
+                        "open": float(quote.get("open") or quote.get("current_price")),
+                        "volume": float(quote.get("volume") or 0),
+                    }
+                    logger.info(f"Open price for {symbol}: {prices[symbol]['close']}")
+            except Exception as e:
+                logger.error(f"Error fetching close for {symbol}: {e}")
+            time.sleep(0.3)
+            
     return prices
 
 

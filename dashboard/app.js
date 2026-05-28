@@ -38,6 +38,18 @@ document.addEventListener("DOMContentLoaded", () => {
   // Load automation schedule status (refreshes every 60s)
   loadScheduleStatus();
   setInterval(loadScheduleStatus, 60_000);
+
+  // Fade out welcome screen after exactly 2 seconds
+  setTimeout(() => {
+    const welcomeScreen = document.getElementById("welcome-screen");
+    if (welcomeScreen) {
+      welcomeScreen.classList.add("fade-out");
+      // Complete removal from display layout after 800ms fade transition
+      setTimeout(() => {
+        welcomeScreen.style.display = "none";
+      }, 800);
+    }
+  }, 2000);
 });
 
 // ─────────────────────────────────────────────
@@ -83,6 +95,12 @@ async function loadPicks() {
   try {
     const data = await apiFetch("/api/picks");
     
+    // Check if the market is closed today
+    if (data && (data._market_closed === true || data._market_closed === "true")) {
+      showMarketClosedScreen(data.message || "Market is closed today. Have a wonderful day!");
+      return;
+    }
+    
     const isScanning = data && data._is_scanning === true;
     const hasTodayPicks = data && data._has_today_picks === true;
     
@@ -113,6 +131,47 @@ async function loadPicks() {
     console.warn("Could not load picks:", e);
     document.getElementById("no-data-overlay").classList.remove("hidden");
   }
+}
+
+function showMarketClosedScreen(message) {
+  const overlay = document.getElementById("no-data-overlay");
+  if (!overlay) return;
+  
+  overlay.classList.remove("hidden");
+  overlay.innerHTML = `
+    <div class="no-data-card" style="border: 1px solid rgba(251, 146, 60, 0.15); background: rgba(26, 20, 31, 0.7); backdrop-filter: blur(35px) saturate(180%); -webkit-backdrop-filter: blur(35px) saturate(180%); max-width: 480px; width: 90%; margin: 0 auto; box-shadow: 0 40px 90px rgba(0, 0, 0, 0.8), 0 0 60px rgba(249, 115, 22, 0.04); border-radius: 28px; padding: 56px 40px; text-align: center; color: var(--text-primary);">
+      <div class="no-data-icon" style="font-size: 64px; margin-bottom: 24px; display: inline-block; animation: float-logo 3.8s ease-in-out infinite; filter: drop-shadow(0 0 25px rgba(249, 115, 22, 0.35));">🌅</div>
+      <h2 style="font-size: 28px; font-weight: 900; margin-bottom: 12px; font-family: 'Fraunces', serif; background: linear-gradient(135deg, #fff7ed 20%, #fdba74 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+        Market is Closed Today
+      </h2>
+      <p style="max-width: 400px; margin: 15px auto; line-height: 1.7; color: #ffedd5; font-size: 16px; font-style: italic; font-family: 'Fraunces', 'Playfair Display', serif;">
+        "${message}"
+      </p>
+      <div style="margin: 28px auto 10px; border-top: 1px solid var(--border); padding-top: 20px;">
+        <span style="font-size: 11px; color: #c5a880; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; display: block; font-family: 'Inter', sans-serif;">
+          📅 NSE India Trading Holiday
+        </span>
+        <p style="font-size: 12px; color: var(--text-muted); margin-top: 8px; line-height: 1.6;">Live scanners, pricing engines, and database updates will resume on the next trading morning.</p>
+      </div>
+    </div>
+  `;
+  
+  // Hide top ticker
+  const ticker = document.getElementById("ticker-wrap");
+  if (ticker) ticker.style.display = "none";
+  
+  // Clear any existing grid/table stock lists
+  const picksGrid = document.getElementById("picks-grid");
+  if (picksGrid) picksGrid.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">No stocks listed — Market is closed.</div>';
+  
+  const tableBody = document.getElementById("live-table-body");
+  if (tableBody) tableBody.innerHTML = '<tr><td colspan="8" class="table-empty">No live stocks listed — Market is closed.</td></tr>';
+  
+  // Zero active picks badge
+  const badge = document.getElementById("picks-badge");
+  if (badge) badge.innerText = "0";
+  const badgeTotal = document.getElementById("picks-total-badge");
+  if (badgeTotal) badgeTotal.innerText = "0";
 }
 
 function showAutoGenerationOverlay(isScanning) {
@@ -148,8 +207,18 @@ function startLiveLoop() {
   countdown = LIVE_INTERVAL;
   if (countdownTimer) clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
-    countdown--;
+    const now    = new Date();
+    const istMin = ((now.getUTCHours() * 60 + now.getUTCMinutes()) + 330) % 1440;
+    const day    = now.getUTCDay();
+    const isOpen = day >= 1 && day <= 5 && istMin >= 9*60+15 && istMin <= 16*60;
+
     const el = document.getElementById("refresh-countdown");
+    if (!isOpen) {
+      if (el) el.textContent = "Market Closed — Updates Paused";
+      return;
+    }
+
+    countdown--;
     if (el) el.textContent = countdown > 0 ? `Next update: ${countdown}s` : "Updating...";
     if (countdown <= 0) countdown = LIVE_INTERVAL;
   }, 1000);
@@ -157,7 +226,14 @@ function startLiveLoop() {
   // Price fetch loop
   if (liveInterval) clearInterval(liveInterval);
   liveInterval = setInterval(() => {
-    fetchLivePrices();
+    const now    = new Date();
+    const istMin = ((now.getUTCHours() * 60 + now.getUTCMinutes()) + 330) % 1440;
+    const day    = now.getUTCDay();
+    const isOpen = day >= 1 && day <= 5 && istMin >= 9*60+15 && istMin <= 16*60;
+
+    if (isOpen) {
+      fetchLivePrices();
+    }
   }, LIVE_INTERVAL * 1000);
 }
 
