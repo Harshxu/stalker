@@ -30,6 +30,29 @@ import db_manager
 
 logger = logging.getLogger(__name__)
 
+# ⚠️ TEMPORARY — HEARTBEAT STATE — REMOVE AFTER TESTING ⚠️
+_last_heartbeat_time: float = 0.0
+_HEARTBEAT_INTERVAL_SEC: int = 10 * 60   # every 10 minutes
+
+def _maybe_send_heartbeat():
+    """Send heartbeat email if 10+ min passed. Called on every HTTP request."""
+    global _last_heartbeat_time
+    now = time.time()
+    if now - _last_heartbeat_time < _HEARTBEAT_INTERVAL_SEC:
+        return
+    _last_heartbeat_time = now
+    try:
+        import test_heartbeat
+        threading.Thread(
+            target=test_heartbeat.send_heartbeat_email,
+            daemon=True,
+            name="HeartbeatMailer"
+        ).start()
+        logger.info("[HEARTBEAT] Triggered heartbeat email")
+    except Exception as e:
+        logger.error(f"[HEARTBEAT] Failed: {e}")
+# ⚠️ END TEMPORARY
+
 # ─────────────────────────────────────────────
 # LIVE PRICE CACHE (updated every 20 seconds)
 # ─────────────────────────────────────────────
@@ -422,6 +445,7 @@ class StalkerHandler(SimpleHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        _maybe_send_heartbeat()  # ⚠️ TEMP — fires email every 10 min via UptimeRobot pings
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip("/")
 
@@ -495,25 +519,6 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
     Start the STALKER live dashboard server.
     Serves dashboard + API, polls live prices in background.
     """
-    # ⚠️  TEMPORARY — HEARTBEAT TEST MAILER — REMOVE AFTER TESTING ⚠️
-    # Must be started BEFORE os.chdir() below — otherwise import fails (wrong cwd).
-    # Sends "Yes, I'm active" email every 15 min to verify Render + Formsubmit.
-    try:
-        import test_heartbeat
-
-        def _run_heartbeat_loop():
-            test_heartbeat.send_heartbeat_email()       # fire immediately on boot
-            import time as _time
-            while True:
-                _time.sleep(test_heartbeat.HEARTBEAT_INTERVAL_MINUTES * 60)
-                test_heartbeat.send_heartbeat_email()
-
-        threading.Thread(target=_run_heartbeat_loop, daemon=True, name="HeartbeatMailer").start()
-        print("  [TEMP] Heartbeat mailer started — email every 15 min to verify uptime")
-    except Exception as _hb_err:
-        print(f"  [TEMP] Heartbeat mailer failed to start: {_hb_err}")
-    # ⚠️  END TEMPORARY BLOCK ⚠️
-
     # Change working dir to dashboard folder so static files are served
     dashboard_dir = os.path.join(config.BASE_DIR, "dashboard")
     os.chdir(dashboard_dir)
