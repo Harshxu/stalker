@@ -1,136 +1,114 @@
 # -*- coding: utf-8 -*-
 """
-╔══════════════════════════════════════════════════════════╗
-║  STALKER — HEARTBEAT TEST MAILER                        ║
-║  ⚠️  TEMPORARY — REMOVE AFTER TESTING ⚠️               ║
-║                                                          ║
-║  Purpose : Sends a "Yes, I'm active" test email every   ║
-║            15 minutes so we can confirm:                 ║
-║              1. Render / UptimeRobot keeps the app live  ║
-║              2. Formsubmit email delivery is working     ║
-║                                                          ║
-║  Run     : python test_heartbeat.py                      ║
-║  Remove  : Delete this file once testing is done        ║
-╚══════════════════════════════════════════════════════════╝
+STALKER - HEARTBEAT TEST MAILER
+WARNING: TEMPORARY - REMOVE AFTER TESTING
+
+Sends "Yes I'm active" email every 10 minutes via Gmail SMTP.
+Uses Gmail SMTP (not Formsubmit) because Formsubmit is behind Cloudflare
+which blocks all cloud server IPs (Render, AWS, etc.) with 403.
+
+Required in .env or Render Environment Variables:
+    GMAIL_USER=harshkumawat9950@gmail.com
+    GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx   (16-char Google App Password)
+    FORMSUBMIT_TO=harshkumawat9950@gmail.com (used as recipient)
+
+How to get Gmail App Password:
+    1. Go to myaccount.google.com/security
+    2. Enable 2-Step Verification (if not already)
+    3. Search "App Passwords" -> Create one for Mail
+    4. Copy the 16-character password into GMAIL_APP_PASSWORD
 """
 
 import os
-import sys
-import time
+import smtplib
 import logging
-import requests
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 
-# ─── Load .env (same pattern as rest of project) ──────────
+# ─── Load .env ─────────────────────────────────────────────
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 except ImportError:
     pass
 
-# ─── Config (read directly — NO import of config.py) ──────
-FORMSUBMIT_TO = os.getenv("FORMSUBMIT_TO", "")
-FORMSUBMIT_ENDPOINT = f"https://formsubmit.co/ajax/{FORMSUBMIT_TO}" if FORMSUBMIT_TO else ""
-HEARTBEAT_INTERVAL_MINUTES = 15          # ← change here if needed
+# ─── Config ────────────────────────────────────────────────
+GMAIL_USER          = os.getenv("GMAIL_USER", "")
+GMAIL_APP_PASSWORD  = os.getenv("GMAIL_APP_PASSWORD", "")
+MAIL_TO             = os.getenv("FORMSUBMIT_TO", GMAIL_USER)
+HEARTBEAT_INTERVAL_MINUTES = 10    # every 10 minutes
 
-# ─── Logging ──────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [HEARTBEAT] %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
+# ─── Logging ───────────────────────────────────────────────
 logger = logging.getLogger("heartbeat")
 
-# ──────────────────────────────────────────────────────────
-#  HEARTBEAT COUNTER  (increments each time mail is sent)
-# ──────────────────────────────────────────────────────────
+# ─── Counter ───────────────────────────────────────────────
 _heartbeat_count = 0
 
 
 def send_heartbeat_email():
-    """Send a single 'Yes, I'm active' test email via Formsubmit."""
+    """Send a single heartbeat email via Gmail SMTP."""
     global _heartbeat_count
 
-    if not FORMSUBMIT_ENDPOINT:
-        logger.error("FORMSUBMIT_TO is not set in .env — cannot send heartbeat email.")
+    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+        logger.error("[HEARTBEAT] GMAIL_USER or GMAIL_APP_PASSWORD not set. Add them to Render Environment Variables.")
         return
 
     _heartbeat_count += 1
-    now = datetime.now()
-    timestamp_str = now.strftime("%d %b %Y — %I:%M:%S %p")
+    now_str = datetime.now().strftime("%d %b %Y - %I:%M:%S %p")
+    server_name = os.getenv("RENDER_SERVICE_NAME", os.getenv("RENDER_EXTERNAL_URL", "local"))
 
-    payload = {
-        "name": "STALKER Heartbeat",
-        "_subject": f"✅ STALKER is ACTIVE — Heartbeat #{_heartbeat_count}",
-        "_template": "table",
-        "_captcha": "false",
-        "_autoresponse": "false",
-        # ── Mail body fields ──
-        "Status":       "✅ Yes, I'm ACTIVE — Automation is working correctly!",
-        "Heartbeat #":  str(_heartbeat_count),
-        "Timestamp":    timestamp_str,
-        "Interval":     f"Every {HEARTBEAT_INTERVAL_MINUTES} minutes",
-        "Server":       os.getenv("RENDER_SERVICE_NAME", "local / render"),
-        "Note":         "⚠️ This is a TEMPORARY test email. Will be removed after testing.",
-    }
+    # Build email
+    msg = MIMEMultipart("alternative")
+    msg["From"]    = GMAIL_USER
+    msg["To"]      = MAIL_TO
+    msg["Subject"] = f"YES I'M ACTIVE - Stalker Heartbeat #{_heartbeat_count}"
+
+    body_text = f"""
+STALKER HEARTBEAT TEST
+======================
+
+Status   : YES I'M ACTIVE - Automation is working correctly!
+Heartbeat: #{_heartbeat_count}
+Timestamp: {now_str}
+Interval : Every {HEARTBEAT_INTERVAL_MINUTES} minutes
+Server   : {server_name}
+
+WARNING: This is a TEMPORARY test email. Will be removed after testing.
+"""
+
+    body_html = f"""
+<html><body style="font-family:Arial,sans-serif;max-width:500px;margin:auto;padding:20px">
+<h2 style="color:#16a34a">YES I'M ACTIVE</h2>
+<p style="color:#15803d;font-size:18px">Stalker automation is working correctly!</p>
+<table style="border-collapse:collapse;width:100%">
+  <tr><td style="padding:8px;background:#f0fdf4;font-weight:bold">Status</td>
+      <td style="padding:8px;background:#f0fdf4;color:#16a34a">Active</td></tr>
+  <tr><td style="padding:8px;font-weight:bold">Heartbeat #</td>
+      <td style="padding:8px">{_heartbeat_count}</td></tr>
+  <tr><td style="padding:8px;background:#f0fdf4;font-weight:bold">Timestamp</td>
+      <td style="padding:8px;background:#f0fdf4">{now_str}</td></tr>
+  <tr><td style="padding:8px;font-weight:bold">Interval</td>
+      <td style="padding:8px">Every {HEARTBEAT_INTERVAL_MINUTES} minutes</td></tr>
+  <tr><td style="padding:8px;background:#f0fdf4;font-weight:bold">Server</td>
+      <td style="padding:8px;background:#f0fdf4">{server_name}</td></tr>
+</table>
+<p style="color:#dc2626;font-size:12px;margin-top:20px">
+  TEMPORARY TEST EMAIL - Remove after testing is done.
+</p>
+</body></html>
+"""
+
+    msg.attach(MIMEText(body_text, "plain"))
+    msg.attach(MIMEText(body_html, "html"))
 
     try:
-        response = requests.post(
-            FORMSUBMIT_ENDPOINT,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept":       "application/json",
-                "Referer":      "http://localhost:8000/",
-            },
-            timeout=15,
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success") in ("true", True):
-                logger.info(f"Heartbeat #{_heartbeat_count} email sent ✅ → {FORMSUBMIT_TO}")
-            else:
-                logger.warning(f"Formsubmit responded but success=false: {result}")
-                logger.warning("If this is your FIRST email, check inbox for Formsubmit activation link and click it!")
-        else:
-            logger.error(f"Formsubmit HTTP {response.status_code}: {response.text[:300]}")
-
-    except requests.exceptions.Timeout:
-        logger.error("Heartbeat email timed out (15 s) — server may be slow")
+        with smtplib.SMTP("smtp.gmail.com", 587) as smtp:
+            smtp.starttls()
+            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+        logger.info(f"[HEARTBEAT] #{_heartbeat_count} sent via Gmail SMTP to {MAIL_TO}")
+    except smtplib.SMTPAuthenticationError:
+        logger.error("[HEARTBEAT] Gmail auth failed. Check GMAIL_USER and GMAIL_APP_PASSWORD in env vars.")
     except Exception as e:
-        logger.error(f"Heartbeat email failed: {e}")
-
-
-def main():
-    print()
-    print("=" * 60)
-    print("  🫀  STALKER HEARTBEAT TEST MAILER")
-    print("  ⚠️   TEMPORARY — remove after testing")
-    print("=" * 60)
-    print(f"  Email : {FORMSUBMIT_TO or '⛔ NOT SET — check .env'}")
-    print(f"  Fires : every {HEARTBEAT_INTERVAL_MINUTES} minutes")
-    print(f"  Press Ctrl+C to stop")
-    print("=" * 60)
-    print()
-
-    if not FORMSUBMIT_TO:
-        print("❌ ERROR: FORMSUBMIT_TO is not set in your .env file.")
-        print("   Add this line:  FORMSUBMIT_TO=your@email.com")
-        sys.exit(1)
-
-    # Send first heartbeat immediately so we don't wait 15 min to verify
-    logger.info("Sending FIRST heartbeat immediately...")
-    send_heartbeat_email()
-
-    interval_seconds = HEARTBEAT_INTERVAL_MINUTES * 60
-
-    while True:
-        next_fire = datetime.now().strftime("%I:%M:%S %p")
-        logger.info(f"Sleeping {HEARTBEAT_INTERVAL_MINUTES} min — next email at {next_fire} + {HEARTBEAT_INTERVAL_MINUTES}m")
-        time.sleep(interval_seconds)
-        send_heartbeat_email()
-
-
-if __name__ == "__main__":
-    main()
+        logger.error(f"[HEARTBEAT] Gmail SMTP error: {e}")
