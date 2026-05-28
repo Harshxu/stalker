@@ -507,7 +507,7 @@ class StalkerHandler(SimpleHTTPRequestHandler):
             pass
 
     def do_GET(self):
-        _maybe_send_heartbeat()  # ⚠️ TEMP — fires email every 10 min via UptimeRobot pings
+        # _maybe_send_heartbeat()  # ⚠️ TEMP — fires email every 10 min via UptimeRobot pings
         parsed = urlparse(self.path)
         path   = parsed.path.rstrip("/")
 
