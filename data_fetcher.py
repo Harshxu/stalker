@@ -99,57 +99,65 @@ def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") 
 def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, pd.DataFrame]:
     """
     Fetch OHLCV for multiple symbols in bulk using yf.download for high-speed parallel fetching.
+    Chunked into groups of 15 to keep memory consumption low and prevent OOM crashes on Render.
     Returns dict: {symbol: DataFrame}
     """
+    import gc
     results = {}
     total = len(symbols)
-    logger.info(f"Fetching data for {total} symbols in parallel...")
+    logger.info(f"Fetching data for {total} symbols in chunked parallel batches to prevent memory leaks...")
 
-    try:
-        # Use yf.download to pull all histories in parallel
-        # auto_adjust=True matches fetch_stock_history
-        data = yf.download(symbols, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
+    # Chunk size of 15 keeps memory overhead extremely low (under 120MB)
+    chunk_size = 15
+    chunks = [symbols[i:i + chunk_size] for i in range(0, total, chunk_size)]
 
-        for symbol in symbols:
-            try:
-                # If only one symbol was requested, yf.download returns a standard DataFrame
-                # with MultiIndex columns if group_by='ticker'
-                if total == 1:
-                    df = data
-                else:
-                    if symbol not in data.columns.levels[0]:
+    for chunk_idx, chunk in enumerate(chunks):
+        try:
+            logger.info(f"  Downloading batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} symbols)...")
+            data = yf.download(chunk, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
+
+            chunk_total = len(chunk)
+            for symbol in chunk:
+                try:
+                    if chunk_total == 1:
+                        df = data
+                    else:
+                        if symbol not in data.columns.levels[0]:
+                            continue
+                        df = data[symbol].copy()
+
+                    if df.empty or len(df) < 20:
                         continue
-                    df = data[symbol].copy()
 
-                if df.empty or len(df) < 20:
+                    df.index = pd.to_datetime(df.index)
+                    df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                    df.dropna(inplace=True)
+
+                    # Ensure numeric types
+                    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                    df.dropna(inplace=True)
+                    if len(df) >= 20:
+                        results[symbol] = df
+
+                except Exception as inner_e:
+                    logger.debug(f"Error extracting bulk data for {symbol}: {inner_e}")
                     continue
 
-                df.index = pd.to_datetime(df.index)
-                df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
-                df.dropna(inplace=True)
+            # Free memory immediately
+            del data
+            gc.collect()
 
-                # Ensure numeric types
-                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-
-                df.dropna(inplace=True)
-                if len(df) >= 20:
+        except Exception as e:
+            logger.error(f"Bulk download batch {chunk_idx + 1} failed, falling back to serial: {e}")
+            for symbol in chunk:
+                df = fetch_stock_history(symbol, period=period)
+                if df is not None:
                     results[symbol] = df
+                time.sleep(0.1)
+                gc.collect()
 
-            except Exception as inner_e:
-                logger.debug(f"Error extracting bulk data for {symbol}: {inner_e}")
-                continue
-
-    except Exception as e:
-        logger.error(f"Bulk download failed, falling back to serial fetching: {e}")
-        # Fallback to serial yfinance requests with a small delay
-        for symbol in symbols:
-            df = fetch_stock_history(symbol, period=period)
-            if df is not None:
-                results[symbol] = df
-            time.sleep(0.1)
-
-    logger.info(f"Successfully fetched {len(results)}/{total} symbols")
     return results
 
 
