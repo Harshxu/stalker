@@ -15,7 +15,21 @@ from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 import config
 
+import requests
+
 logger = logging.getLogger(__name__)
+
+def get_browser_session():
+    """Create a requests session with browser headers to prevent anti-bot blocking on cloud IPs."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+    })
+    return session
 
 
 # ─────────────────────────────────────────────
@@ -28,7 +42,7 @@ def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") 
     Returns DataFrame with columns: Open, High, Low, Close, Volume
     """
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_browser_session())
         df = ticker.history(period=period, interval=interval, auto_adjust=True)
 
         if df.empty or len(df) < 20:
@@ -63,7 +77,7 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
     try:
         # Use yf.download to pull all histories in parallel
         # auto_adjust=True matches fetch_stock_history
-        data = yf.download(symbols, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
+        data = yf.download(symbols, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
 
         for symbol in symbols:
             try:
@@ -197,7 +211,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
     }
 
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_browser_session())
         info = ticker.info
 
         if not info:
@@ -264,7 +278,7 @@ def fetch_current_quote(symbol: str) -> Dict:
     Used during market hours to capture open and close prices.
     """
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_browser_session())
         info = ticker.info
 
         return {
@@ -371,7 +385,7 @@ def fetch_news_signals(symbol: str) -> Dict:
     }
 
     try:
-        ticker = yf.Ticker(symbol)
+        ticker = yf.Ticker(symbol, session=get_browser_session())
         news = ticker.news
 
         if not news:

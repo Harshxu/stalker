@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 import yfinance as yf
 
 import config
+from data_fetcher import get_browser_session
 import db_manager
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     
     try:
         # Try primary parallel download using history endpoint (immune to crumb errors)
-        data = yf.download(symbols, period="5d", interval="1d", group_by="ticker", threads=True, progress=False)
+        data = yf.download(symbols, period="5d", interval="1d", group_by="ticker", threads=True, progress=False, session=get_browser_session())
         
         for symbol in symbols:
             try:
@@ -131,7 +132,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
         # Fallback: Serial fetching using history API (also resilient to crumb errors)
         for symbol in symbols:
             try:
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(symbol, session=get_browser_session())
                 df = ticker.history(period="5d")
                 df.dropna(subset=["Close"], inplace=True)
                 if df.empty:
