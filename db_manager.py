@@ -29,7 +29,7 @@ def _init_mongo():
         _mongo_client.server_info()   # Ping
         _mongo_db  = _mongo_client[config.MONGO_DB_NAME]
         _use_mongo = True
-        logger.info("✅ MongoDB connected")
+        logger.info("[OK] MongoDB connected")
     except Exception as e:
         _use_mongo = False
         logger.warning(f"MongoDB unavailable — using local JSON files. ({e})")
@@ -90,7 +90,7 @@ def save_daily_picks(scan_result: Dict) -> bool:
         try:
             col = db[config.MONGO_COLLECTION_PICKS]
             col.replace_one({"date": today}, record, upsert=True)
-            logger.info(f"💾 Picks saved to MongoDB for {today}")
+            logger.info(f"[DB] Picks saved to MongoDB for {today}")
             return True
         except Exception as e:
             logger.error(f"MongoDB save error: {e}")
@@ -101,7 +101,7 @@ def save_daily_picks(scan_result: Dict) -> bool:
     all_picks.append(record)
     all_picks = all_picks[-90:]   # Keep last 90 days
     _write_json("daily_picks.json", all_picks)
-    logger.info(f"💾 Picks saved to JSON for {today}")
+    logger.info(f"[FILE] Picks saved to JSON for {today}")
     return True
 
 
@@ -176,7 +176,7 @@ def save_eod_report(eod_data: Dict) -> bool:
         try:
             col = db["eod_reports"]
             col.replace_one({"date": today}, eod_data, upsert=True)
-            logger.info(f"💾 EOD Report saved to MongoDB for {today}")
+            logger.info(f"[DB] EOD Report saved to MongoDB for {today}")
             return True
         except Exception as e:
             logger.error(f"MongoDB save EOD report error: {e}")
@@ -186,7 +186,7 @@ def save_eod_report(eod_data: Dict) -> bool:
     all_reports.append(eod_data)
     all_reports = all_reports[-180:]
     _write_json("eod_reports_history.json", all_reports)
-    logger.info(f"💾 EOD Report saved to JSON for {today}")
+    logger.info(f"[FILE] EOD Report saved to JSON for {today}")
     return True
 
 
@@ -330,7 +330,7 @@ def cleanup_old_data(days_to_keep: int = 10):
     """
     from datetime import timedelta
     limit_date = str(date.today() - timedelta(days=days_to_keep))
-    logger.info(f"🧹 Starting MongoDB cleanup: deleting data older than {limit_date} ({days_to_keep} days ago)")
+    logger.info(f"[CLEANUP] Starting MongoDB cleanup: deleting data older than {limit_date} ({days_to_keep} days ago)")
     
     db = get_db()
     if db is None:
@@ -358,7 +358,7 @@ def cleanup_old_data(days_to_keep: int = 10):
         perf_res = perf_col.delete_many({"date": {"$lt": limit_date}})
         logger.info(f"Deleted {perf_res.deleted_count} old records from {config.MONGO_COLLECTION_PERFORMANCE}")
         
-        logger.info("✅ MongoDB cleanup complete!")
+        logger.info("[OK] MongoDB cleanup complete!")
         return True
     except Exception as e:
         logger.error(f"Error during MongoDB cleanup: {e}", exc_info=True)

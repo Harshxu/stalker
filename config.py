@@ -48,18 +48,46 @@ NIFTY50_SYMBOLS = [
     "TATACONSUM.NS", "BRITANNIA.NS", "VEDL.NS", "ADANIENT.NS", "BAJAJ-AUTO.NS"
 ]
 
-# Additional liquid mid-cap candidates (under ₹5,000 typically)
+# Additional liquid mid-cap & high-growth candidates (railways, energy, financials, etc.)
 MIDCAP_SYMBOLS = [
     "ZOMATO.NS", "PAYTM.NS", "IRCTC.NS", "CANBK.NS", "PNB.NS",
     "BANKBARODA.NS", "SAIL.NS", "NHPC.NS", "IOC.NS", "HPCL.NS",
     "RECLTD.NS", "PFC.NS", "IRFC.NS", "BHEL.NS", "HAL.NS",
     "MARICO.NS", "PIDILITIND.NS", "DABUR.NS", "COLPAL.NS", "LUPIN.NS",
-    "AUROPHARMA.NS", "TORNTPHARM.NS", "GLAXO.NS", "MPHASIS.NS", "LTTS.NS"
+    "AUROPHARMA.NS", "TORNTPHARM.NS", "GLAXO.NS", "MPHASIS.NS", "LTTS.NS",
+    # Highly active railway stocks
+    "RVNL.NS", "IRCON.NS", "RAILTEL.NS", "TEXRAIL.NS", "TITAGARH.NS",
+    # Energy, Renewable & Power
+    "IREDA.NS", "SJVN.NS", "SUZLON.NS", "TATAPOWER.NS", "CESC.NS", 
+    "TORNTPOWER.NS", "JSWENERGY.NS", "ADANIPOWER.NS",
+    # Finance, NBFCs & Market Infrastructure
+    "CDSL.NS", "BSE.NS", "MCX.NS", "HUDCO.NS", "MANAPPURAM.NS", 
+    "MUTHOOTFIN.NS", "UNIONBANK.NS", "IDBI.NS", "J&KBANK.NS", 
+    "KARURVYSYA.NS", "CUB.NS", "FEDERALBNK.NS", "IDFCFIRSTB.NS", 
+    "BANDHANBNK.NS", "RBLBANK.NS", "LICHSGFIN.NS",
+    # IT & High Tech
+    "KPITTECH.NS", "COFORGE.NS", "PERSISTENT.NS", "CYIENT.NS", "TATAELXSI.NS", 
+    "LTIM.NS", "OFSS.NS", "ZENSARTECH.NS", "MAPMYINDIA.NS", "AFFLE.NS",
+    # Real Estate & Infra
+    "DLF.NS", "GODREJPROP.NS", "OBEROLRLTY.NS", "PRESTIGE.NS", "SOBHA.NS", 
+    "NBCC.NS", "NCC.NS", "GMRINFRA.NS", "IRB.NS", "HFCL.NS", "KEC.NS", 
+    "ENGINERSIN.NS",
+    # Automotive, Tyres & Ancillaries
+    "ASHOKLEY.NS", "TVSMOTOR.NS", "BALKRISIND.NS", "APOLLOTYRE.NS", 
+    "CEAT.NS", "JKTYRE.NS", "EXIDEIND.NS", "AMARAJABAT.NS", "UNOINDA.NS", 
+    "CIEINDIA.NS",
+    # Pharma, Healthcare & Biotech
+    "BIOCON.NS", "GLENMARK.NS", "IPCALAB.NS", "LAURUSLABS.NS", 
+    "NATCOPHARM.NS", "GRANULES.NS", "MARKSANS.NS", "ZYDUSLIFE.NS", "ALKEM.NS",
+    # Chemicals & Fertilizers
+    "DEEPAKNTR.NS", "SRF.NS", "UPL.NS", "PIIND.NS", "TATACHEM.NS", 
+    "GUJALKALI.NS", "COROMANDEL.NS",
+    # Consumption & Retail
+    "ABFRL.NS", "BATAINDIA.NS", "RELAXO.NS", "KALYANKJIL.NS", "SENCO.NS", 
+    "DEVYANI.NS", "WESTLIFE.NS", "CAMPUS.NS"
 ]
 
-# BSE-listed stocks for broader coverage (complement to NSE universe)
-# Yahoo Finance uses .BO suffix for BSE. Screener will disqualify any
-# that fail price, liquidity, or technical thresholds automatically.
+# BSE-listed stocks for broader coverage
 BSE_SYMBOLS = [
     # Banking & NBFCs
     "IDFCFIRSTB.BO", "FEDERALBNK.BO", "BANDHANBNK.BO", "RBLBANK.BO",

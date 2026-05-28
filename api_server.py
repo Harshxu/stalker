@@ -67,50 +67,111 @@ _tracked_symbols: List[str] = []
 
 def _fetch_live_prices(symbols: List[str]) -> Dict:
     """
-    Fetch the latest price for each symbol using yfinance fast_info.
-    Returns dict: { symbol: { price, change, change_pct, volume, high, low } }
+    Fetch the latest price and details for each symbol using yfinance history endpoint.
+    Avoids using ticker.info to prevent "Invalid Crumb" / 401 Unauthorized blocks on Render.
     """
     if not symbols:
         return {}
 
     results = {}
-    for symbol in symbols:
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.info
-
-            last_price = info.get("currentPrice") or info.get("regularMarketPrice")
-            prev_close = info.get("previousClose") or info.get("regularMarketPreviousClose")
-            day_high   = info.get("dayHigh") or info.get("regularMarketDayHigh")
-            day_low    = info.get("dayLow") or info.get("regularMarketDayLow")
-            volume     = info.get("volume") or info.get("regularMarketVolume")
-
-            if last_price is None:
+    total = len(symbols)
+    
+    try:
+        # Try primary parallel download using history endpoint (immune to crumb errors)
+        data = yf.download(symbols, period="5d", interval="1d", group_by="ticker", threads=True, progress=False)
+        
+        for symbol in symbols:
+            try:
+                if total == 1:
+                    df = data
+                else:
+                    if symbol not in data.columns.levels[0]:
+                        continue
+                    df = data[symbol].copy()
+                
+                df.dropna(subset=["Close"], inplace=True)
+                if df.empty:
+                    continue
+                
+                latest_row = df.iloc[-1]
+                last_price = latest_row["Close"]
+                day_high = latest_row["High"]
+                day_low = latest_row["Low"]
+                volume = latest_row["Volume"]
+                
+                prev_close = None
+                if len(df) >= 2:
+                    prev_close = df.iloc[-2]["Close"]
+                
+                if last_price is None:
+                    continue
+                    
+                change = round(float(last_price - prev_close), 2) if prev_close else 0.0
+                change_pct = round(float((change / prev_close) * 100), 2) if prev_close else 0.0
+                
+                results[symbol] = {
+                    "symbol":     symbol,
+                    "name":       symbol.replace(".NS", "").replace(".BO", ""),
+                    "price":      round(float(last_price), 2),
+                    "prev_close": round(float(prev_close), 2) if prev_close else None,
+                    "change":     change,
+                    "change_pct": change_pct,
+                    "day_high":   round(float(day_high), 2) if day_high else None,
+                    "day_low":    round(float(day_low), 2) if day_low else None,
+                    "volume":     int(volume) if volume else None,
+                    "direction":  "up" if change >= 0 else "down",
+                    "fetched_at": datetime.now().isoformat(),
+                }
+            except Exception as e:
+                logger.debug(f"Error parsing bulk data for {symbol}: {e}")
                 continue
-
-            change     = round(last_price - prev_close, 2) if prev_close else 0
-            change_pct = round((change / prev_close) * 100, 2) if prev_close else 0
-
-            results[symbol] = {
-                "symbol":     symbol,
-                "name":       symbol.replace(".NS", "").replace(".BO", ""),
-                "price":      round(float(last_price), 2),
-                "prev_close": round(float(prev_close), 2) if prev_close else None,
-                "change":     change,
-                "change_pct": change_pct,
-                "day_high":   round(float(day_high), 2) if day_high else None,
-                "day_low":    round(float(day_low), 2) if day_low else None,
-                "volume":     int(volume) if volume else None,
-                "direction":  "up" if change >= 0 else "down",
-                "fetched_at": datetime.now().isoformat(),
-            }
-            time.sleep(0.15)   # Rate limit — be gentle with Yahoo Finance
-
-        except Exception as e:
-            logger.debug(f"Live price error for {symbol}: {e}")
-            continue
-
+                
+    except Exception as bulk_err:
+        logger.warning(f"Bulk download failed: {bulk_err}. Falling back to serial history fetching.")
+        # Fallback: Serial fetching using history API (also resilient to crumb errors)
+        for symbol in symbols:
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period="5d")
+                df.dropna(subset=["Close"], inplace=True)
+                if df.empty:
+                    continue
+                    
+                latest_row = df.iloc[-1]
+                last_price = latest_row["Close"]
+                day_high = latest_row["High"]
+                day_low = latest_row["Low"]
+                volume = latest_row["Volume"]
+                
+                prev_close = None
+                if len(df) >= 2:
+                    prev_close = df.iloc[-2]["Close"]
+                
+                if last_price is None:
+                    continue
+                    
+                change = round(float(last_price - prev_close), 2) if prev_close else 0.0
+                change_pct = round(float((change / prev_close) * 100), 2) if prev_close else 0.0
+                
+                results[symbol] = {
+                    "symbol":     symbol,
+                    "name":       symbol.replace(".NS", "").replace(".BO", ""),
+                    "price":      round(float(last_price), 2),
+                    "prev_close": round(float(prev_close), 2) if prev_close else None,
+                    "change":     change,
+                    "change_pct": change_pct,
+                    "day_high":   round(float(day_high), 2) if day_high else None,
+                    "day_low":    round(float(day_low), 2) if day_low else None,
+                    "volume":     int(volume) if volume else None,
+                    "direction":  "up" if change >= 0 else "down",
+                    "fetched_at": datetime.now().isoformat(),
+                }
+                time.sleep(0.15)
+            except Exception as serial_err:
+                logger.error(f"Failed to fetch serial history for {symbol}: {serial_err}")
+                
     return results
+
 
 
 def _refresh_cache():

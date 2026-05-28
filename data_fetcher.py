@@ -53,25 +53,57 @@ def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") 
 
 def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, pd.DataFrame]:
     """
-    Fetch OHLCV for multiple symbols with rate-limiting.
+    Fetch OHLCV for multiple symbols in bulk using yf.download for high-speed parallel fetching.
     Returns dict: {symbol: DataFrame}
     """
     results = {}
     total = len(symbols)
+    logger.info(f"Fetching data for {total} symbols in parallel...")
 
-    logger.info(f"Fetching data for {total} symbols...")
+    try:
+        # Use yf.download to pull all histories in parallel
+        # auto_adjust=True matches fetch_stock_history
+        data = yf.download(symbols, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False)
 
-    for i, symbol in enumerate(symbols, 1):
-        print(f"\r  Fetching {i}/{total}: {symbol:<20}", end="", flush=True)
+        for symbol in symbols:
+            try:
+                # If only one symbol was requested, yf.download returns a standard DataFrame
+                # with MultiIndex columns if group_by='ticker'
+                if total == 1:
+                    df = data
+                else:
+                    if symbol not in data.columns.levels[0]:
+                        continue
+                    df = data[symbol].copy()
 
-        df = fetch_stock_history(symbol, period=period)
-        if df is not None:
-            results[symbol] = df
+                if df.empty or len(df) < 20:
+                    continue
 
-        # Rate limiting — avoid Yahoo Finance blocks
-        time.sleep(0.3)
+                df.index = pd.to_datetime(df.index)
+                df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
+                df.dropna(inplace=True)
 
-    print()  # newline after progress
+                # Ensure numeric types
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                df.dropna(inplace=True)
+                if len(df) >= 20:
+                    results[symbol] = df
+
+            except Exception as inner_e:
+                logger.debug(f"Error extracting bulk data for {symbol}: {inner_e}")
+                continue
+
+    except Exception as e:
+        logger.error(f"Bulk download failed, falling back to serial fetching: {e}")
+        # Fallback to serial yfinance requests with a small delay
+        for symbol in symbols:
+            df = fetch_stock_history(symbol, period=period)
+            if df is not None:
+                results[symbol] = df
+            time.sleep(0.1)
+
     logger.info(f"Successfully fetched {len(results)}/{total} symbols")
     return results
 
@@ -105,11 +137,41 @@ def fetch_market_indices() -> Dict[str, Optional[pd.DataFrame]]:
 # Fundamental Data Fetcher
 # ─────────────────────────────────────────────
 
+# Global cache for fundamentals
+_fundamentals_cache = None
+FUNDAMENTALS_CACHE_FILE = os.path.join(config.DATA_DIR, "fundamentals_cache.json")
+
 def fetch_fundamentals(symbol: str) -> Dict:
     """
-    Fetch fundamental data: P/E, debt, promoter holding, market cap, sector.
-    Returns dict with fundamental metrics.
+    Fetch fundamental data with a local JSON cache layer to avoid slow yfinance network calls.
     """
+    global _fundamentals_cache
+    
+    # Lazy load cache from file
+    if _fundamentals_cache is None:
+        if os.path.exists(FUNDAMENTALS_CACHE_FILE):
+            try:
+                with open(FUNDAMENTALS_CACHE_FILE, "r") as f:
+                    _fundamentals_cache = json.load(f)
+            except Exception:
+                _fundamentals_cache = {}
+        else:
+            _fundamentals_cache = {}
+            
+    # Return from cache if available
+    if symbol in _fundamentals_cache:
+        # Check if the cache is older than 7 days
+        cached_entry = _fundamentals_cache[symbol]
+        cached_time = cached_entry.get("_cached_at")
+        if cached_time:
+            try:
+                age = (datetime.now() - datetime.fromisoformat(cached_time)).days
+                if age < 7:
+                    # Return cached metrics
+                    return cached_entry["data"]
+            except Exception:
+                pass
+
     defaults = {
         "symbol": symbol,
         "market_cap": 0,
@@ -170,20 +232,20 @@ def fetch_fundamentals(symbol: str) -> Dict:
         if fundamentals["debt_to_equity"] is not None:
             fundamentals["debt_to_equity"] = fundamentals["debt_to_equity"] / 100
 
-        # Check recent earnings (within last 30 days)
+        # Skip slow yfinance earnings_dates call as it frequently hangs the morning scan
+        fundamentals["has_recent_earnings"] = False
+        fundamentals["earnings_surprise"] = None
+
+        # Save to cache
+        _fundamentals_cache[symbol] = {
+            "_cached_at": datetime.now().isoformat(),
+            "data": fundamentals
+        }
         try:
-            earnings = ticker.earnings_dates
-            if earnings is not None and not earnings.empty:
-                recent = earnings[earnings.index <= pd.Timestamp.now()]
-                if not recent.empty:
-                    latest = recent.index[0]
-                    days_ago = (pd.Timestamp.now() - latest).days
-                    if days_ago <= 30:
-                        fundamentals["has_recent_earnings"] = True
-                        surprise = recent.iloc[0].get("Surprise(%)")
-                        fundamentals["earnings_surprise"] = surprise
-        except Exception:
-            pass
+            with open(FUNDAMENTALS_CACHE_FILE, "w") as f:
+                json.dump(_fundamentals_cache, f, indent=2, default=str)
+        except Exception as cache_save_err:
+            logger.debug(f"Failed to save fundamentals cache: {cache_save_err}")
 
         return fundamentals
 
@@ -265,11 +327,40 @@ def fetch_close_prices(symbols: List[str]) -> Dict[str, Dict]:
 # News & Catalyst Detection
 # ─────────────────────────────────────────────
 
+# Global cache for news signals
+_news_cache = None
+NEWS_CACHE_FILE = os.path.join(config.DATA_DIR, "news_cache.json")
+
 def fetch_news_signals(symbol: str) -> Dict:
     """
     Fetch recent news for a stock and detect bullish/bearish catalysts.
-    Returns a signal dict with sentiment and key events.
+    Uses a local JSON cache layer to avoid slow yfinance RSS feed network calls during scoring.
     """
+    global _news_cache
+    
+    # Lazy load cache from file
+    if _news_cache is None:
+        if os.path.exists(NEWS_CACHE_FILE):
+            try:
+                with open(NEWS_CACHE_FILE, "r") as f:
+                    _news_cache = json.load(f)
+            except Exception:
+                _news_cache = {}
+        else:
+            _news_cache = {}
+
+    # Return from cache if available and fresh (less than 4 hours old)
+    if symbol in _news_cache:
+        cached_entry = _news_cache[symbol]
+        cached_time = cached_entry.get("_cached_at")
+        if cached_time:
+            try:
+                age_hours = (datetime.now() - datetime.fromisoformat(cached_time)).total_seconds() / 3600
+                if age_hours < 4:
+                    return cached_entry["data"]
+            except Exception:
+                pass
+
     signals = {
         "symbol": symbol,
         "has_news": False,
@@ -284,6 +375,16 @@ def fetch_news_signals(symbol: str) -> Dict:
         news = ticker.news
 
         if not news:
+            # Save empty to cache to avoid repeatedly trying delisted stocks
+            _news_cache[symbol] = {
+                "_cached_at": datetime.now().isoformat(),
+                "data": signals
+            }
+            try:
+                with open(NEWS_CACHE_FILE, "w") as f:
+                    json.dump(_news_cache, f, indent=2, default=str)
+            except Exception:
+                pass
             return signals
 
         signals["has_news"] = True
@@ -333,6 +434,17 @@ def fetch_news_signals(symbol: str) -> Dict:
             signals["news_sentiment"] = "bearish"
         else:
             signals["news_sentiment"] = "neutral"
+
+        # Save to cache
+        _news_cache[symbol] = {
+            "_cached_at": datetime.now().isoformat(),
+            "data": signals
+        }
+        try:
+            with open(NEWS_CACHE_FILE, "w") as f:
+                json.dump(_news_cache, f, indent=2, default=str)
+        except Exception:
+            pass
 
     except Exception as e:
         logger.error(f"Error fetching news for {symbol}: {e}")
