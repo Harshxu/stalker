@@ -554,6 +554,54 @@ class StalkerHandler(SimpleHTTPRequestHandler):
                 })
             except Exception as e:
                 self._json({"result": "error", "error": str(e)})
+
+        elif path == "/api/morning-test":
+            try:
+                import main
+                # Try to get today's actual picks, or fall back to mock picks
+                scan_data = api_picks()
+                picks = scan_data.get("picks", [])
+                
+                # Transform database picks format to top_picks format expected by _send_morning_email
+                top_picks = []
+                for p in picks:
+                    top_picks.append({
+                        "name": p.get("name", p.get("symbol", "")),
+                        "symbol": p.get("symbol", ""),
+                        "action": p.get("action", "BUY"),
+                        "current_price": p.get("current_price", 0),
+                        "target_2": p.get("target_2", p.get("target", 0)),
+                        "stop_loss": p.get("stop_loss", 0),
+                        "total_score": p.get("total_score", p.get("score", 0)),
+                        "risk_profile": p.get("risk_profile", "Medium")
+                    })
+                
+                scan_result = {
+                    "market_trend": scan_data.get("market_trend", "bullish"),
+                    "top_picks": top_picks
+                }
+                
+                if not top_picks:
+                    # Use mock picks if no picks are generated yet for today
+                    scan_result = {
+                        "market_trend": "bullish",
+                        "top_picks": [
+                            {"name": "RELIANCE.NS", "action": "BUY", "current_price": 1350.50, "target_2": 1385.00, "stop_loss": 1332.00, "total_score": 88.5, "risk_profile": "Medium"},
+                            {"name": "TCS.NS", "action": "BUY", "current_price": 2284.20, "target_2": 2340.00, "stop_loss": 2250.00, "total_score": 85.2, "risk_profile": "Low"},
+                            {"name": "INFY.NS", "action": "WATCH", "current_price": 1159.90, "target_2": 1195.00, "stop_loss": 1140.00, "total_score": 76.8, "risk_profile": "High"},
+                        ]
+                    }
+                
+                main._send_morning_email(scan_result)
+                self._json({
+                    "result":          "sent",
+                    "to":              os.getenv("FORMSUBMIT_TO", ""),
+                    "picks_sent":      len(scan_result.get("top_picks", [])),
+                    "server_time":     datetime.now().isoformat(),
+                    "note":            "Morning Picks test email sent via Brevo! Check your inbox.",
+                })
+            except Exception as e:
+                self._json({"result": "error", "error": str(e)})
         # ⚠️ END TEMPORARY
 
         else:
