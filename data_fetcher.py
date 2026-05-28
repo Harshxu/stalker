@@ -149,6 +149,9 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
             del data
             gc.collect()
 
+            # Small breather between chunks to keep CPU/Network usage perfectly relaxed
+            time.sleep(0.8)
+
         except Exception as e:
             logger.error(f"Bulk download batch {chunk_idx + 1} failed, falling back to serial: {e}")
             for symbol in chunk:
