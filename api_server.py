@@ -454,6 +454,22 @@ class StalkerHandler(SimpleHTTPRequestHandler):
                 "is_scanning":    _is_scanning,
             })
 
+        # ⚠️ TEMPORARY — REMOVE AFTER TESTING ⚠️
+        elif path == "/api/heartbeat-test":
+            try:
+                import test_heartbeat
+                test_heartbeat.send_heartbeat_email()
+                self._json({
+                    "result":          "sent",
+                    "to":              test_heartbeat.FORMSUBMIT_TO,
+                    "heartbeat_count": test_heartbeat._heartbeat_count,
+                    "server_time":     datetime.now().isoformat(),
+                    "note":            "Check your inbox. Remove endpoint after testing.",
+                })
+            except Exception as e:
+                self._json({"result": "error", "error": str(e)})
+        # ⚠️ END TEMPORARY
+
         else:
             # Serve static dashboard files
             super().do_GET()
