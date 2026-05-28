@@ -271,61 +271,155 @@ def generate_eod_report():
 # HELPERS
 # ─────────────────────────────────────────────
 
-def _send_morning_email(scan_result: Dict):
-    endpoint = config.FORMSUBMIT_ENDPOINT
-    if not endpoint:
-        logger.info("Formsubmit not configured (FORMSUBMIT_TO missing) — skipping morning email")
-        return
+def _send_via_brevo(subject: str, html_body: str) -> bool:
+    """Send an email using Brevo REST API over HTTPS."""
+    api_key = os.getenv("BREVO_API_KEY", "")
+    mail_to = os.getenv("FORMSUBMIT_TO", "")
+    mail_from = os.getenv("FORMSUBMIT_TO", "")
+    
+    if not api_key:
+        logger.error("[BREVO] BREVO_API_KEY environment variable is not set!")
+        return False
+        
+    if not mail_to:
+        logger.error("[BREVO] FORMSUBMIT_TO is not set!")
+        return False
 
+    payload = {
+        "sender": {"name": "STALKER Market Analyzer", "email": mail_from},
+        "to":     [{"email": mail_to}],
+        "subject": subject,
+        "htmlContent": html_body,
+    }
+    
+    # Add CC if configured
+    cc_emails = os.getenv("FORMSUBMIT_CC", "")
+    if cc_emails:
+        payload["cc"] = [{"email": email.strip()} for email in cc_emails.split(",") if email.strip()]
+
+    try:
+        resp = requests.post(
+            "https://api.brevo.com/v3/smtp/email",
+            headers={
+                "accept":       "application/json",
+                "api-key":      api_key,
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            logger.info(f"[BREVO] Email successfully sent to {mail_to}")
+            return True
+        else:
+            logger.error(f"[BREVO] Failed to send email (HTTP {resp.status_code}): {resp.text[:300]}")
+            return False
+    except Exception as e:
+        logger.error(f"[BREVO] Error during email send: {e}")
+        return False
+
+
+def _send_morning_email(scan_result: Dict):
     try:
         picks = scan_result.get("top_picks", [])[:10]
         market = scan_result.get("market_trend", "unknown").upper()
         date_str = str(date.today())
         
-        payload = {
-            "name": "STALKER Market Analyzer",
-            "_subject": f"STALKER Morning Picks — {date_str}",
-            "_template": "table",
-            "_captcha": "false",
-            "_autoresponse": "false",
-            "Market Trend": market,
-        }
+        subject = f"🟢 STALKER Morning Picks — {date_str} (Trend: {market})"
         
+        # Build premium HTML email body
+        rows_html = ""
         for i, p in enumerate(picks, 1):
             action = p.get('action', '')
-            emoji = "🟢" if action == "BUY" else "🟡" if action == "WATCH" else "🔴"
+            action_color = "#16a34a" if action == "BUY" else "#d97706" if action == "WATCH" else "#dc2626"
+            action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb" if action == "WATCH" else "#fef2f2"
+            
             name = p.get('name', p.get('symbol', ''))
             price = p.get('current_price', 0)
             target = p.get('target_2', 0)
             stop_loss = p.get('stop_loss', 0)
+            risk = p.get('risk_profile', 'Medium')
+            score = p.get('total_score', 0)
             
-            payload[f"{i}. {name}"] = f"Open: Rs.{price:,.2f} | Target: Rs.{target:,.2f} | SL: Rs.{stop_loss:,.2f} | Action: {emoji} {action}"
-
-        if getattr(config, "FORMSUBMIT_CC", ""):
-            payload["_cc"] = config.FORMSUBMIT_CC
-
-        response = requests.post(
-            endpoint,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "Referer": "http://localhost:8000/",
-            },
-            timeout=15,
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success") == "true" or result.get("success") is True:
-                logger.info(f"Morning email sent via Formsubmit to {config.FORMSUBMIT_TO}")
-            else:
-                logger.warning(f"Formsubmit response: {result}")
-        else:
-            logger.error(f"Formsubmit HTTP {response.status_code}: {response.text[:200]}")
-
+            rows_html += f"""
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+                <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
+                <td style="padding: 12px 8px; text-align: center;">
+                    <span style="display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
+                        {action}
+                    </span>
+                </td>
+                <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">₹{price:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">₹{target:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">₹{stop_loss:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
+                <td style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
+            </tr>
+            """
+            
+        html_body = f"""
+        <html>
+        <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
+            <div style="max-width: 680px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+                <!-- Header -->
+                <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 30px 24px; text-align: center; color: #ffffff;">
+                    <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">🎯 STALKER MARKET ANALYSIS</h1>
+                    <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; font-weight: 500;">Pre-Market Strategy & Top Stock Picks</p>
+                </div>
+                
+                <!-- Info Section -->
+                <div style="padding: 24px; background-color: #ffffff;">
+                    <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #f3f4f6; padding-bottom: 15px; margin-bottom: 20px;">
+                        <div>
+                            <span style="font-size: 12px; color: #9ca3af; text-transform: uppercase; font-weight: bold;">Analysis Date</span>
+                            <div style="font-size: 16px; font-weight: bold; color: #1f2937;">{date_str}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <span style="font-size: 12px; color: #9ca3af; text-transform: uppercase; font-weight: bold;">Market Outlook</span>
+                            <div style="font-size: 16px; font-weight: bold; color: #3b82f6;">{market}</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Table Title -->
+                    <h3 style="margin: 0 0 12px 0; color: #1e3a8a; font-weight: 700; font-size: 18px;">🔥 Today's Top Picks</h3>
+                    
+                    <!-- Table -->
+                    <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                        <thead>
+                            <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; color: #475569; font-weight: bold;">
+                                <th style="padding: 10px 8px; text-align: left;">Stock</th>
+                                <th style="padding: 10px 8px; text-align: center;">Action</th>
+                                <th style="padding: 10px 8px; text-align: right;">Open (Entry)</th>
+                                <th style="padding: 10px 8px; text-align: right;">Target 2</th>
+                                <th style="padding: 10px 8px; text-align: right;">Stop Loss</th>
+                                <th style="padding: 10px 8px; text-align: center;">Score</th>
+                                <th style="padding: 10px 8px; text-align: center;">Risk</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows_html}
+                        </tbody>
+                    </table>
+                    
+                    <!-- Note Section -->
+                    <div style="margin-top: 30px; padding: 15px; background-color: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 4px; font-size: 13px; color: #1e40af; line-height: 1.5;">
+                        <strong>💡 Trading Strategy Note:</strong> Entry is recommended at or near the opening price. Strictly follow the Stop Loss to manage capital risk. Let the targets execute automatically, or trail your Stop Loss in profit to capture maximum gains.
+                    </div>
+                </div>
+                
+                <!-- Footer -->
+                <div style="background-color: #f9fafb; padding: 20px; text-align: center; border-top: 1px solid #f3f4f6; font-size: 12px; color: #9ca3af;">
+                    <p style="margin: 0;">Sent automatically by STALKER Server on Render.</p>
+                    <p style="margin: 5px 0 0 0;">This email is confidential and intended solely for the recipient.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        _send_via_brevo(subject, html_body)
     except Exception as e:
-        logger.error(f"Morning email send failed: {e}")
+        logger.error(f"Morning email failed to build: {e}")
 
 
 def _print_picks_summary(result: Dict):
@@ -356,114 +450,141 @@ def _open_dashboard():
 
 
 def _send_email_report(eod_data: Dict):
-    """
-    Send EOD report via Formsubmit.co AJAX API.
-    No SMTP, no password — just a POST request.
-    """
-    endpoint = config.FORMSUBMIT_ENDPOINT
-    if not endpoint:
-        logger.info("Formsubmit not configured (FORMSUBMIT_TO missing) — skipping email")
-        return
-
+    """Send EOD report via Brevo REST API over HTTPS."""
     try:
         date_str  = eod_data.get("date", "today")
         perf      = eod_data.get("performance", {})
         win_rate  = perf.get("win_rate", 0)
+        avg_pnl   = perf.get("avg_pnl", 0)
+        total_picks = perf.get("total_trades", 0)
         picks     = eod_data.get("picks", [])
         wins      = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
         losses    = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
-
-        payload = {
-            "name": "STALKER Market Analyzer",
-            "_subject": f"STALKER EOD Report — {date_str} | Win Rate: {win_rate:.1f}% | W:{wins} L:{losses}",
-            "_template": "table",
-            "_captcha": "false",
-            "_autoresponse": "false",
-            "30-Day Win Rate": f"{win_rate:.1f}%",
-            "Avg Daily P&L": f"{perf.get('avg_pnl', 0):+.2f}%",
-            "Total Picks": str(perf.get('total_trades', 0))
-        }
-
+        
+        subject = f"📊 STALKER EOD Report — {date_str} | Win Rate: {win_rate:.1f}% | W:{wins} L:{losses}"
+        
+        rows_html = ""
         for i, p in enumerate(picks, 1):
-            pnl = p.get("pnl_pct")
-            pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
+            name = p.get('name', '')
             action = p.get('action', '')
-            emoji = "🟢" if action == "BUY" else "🟡"
+            action_color = "#16a34a" if action == "BUY" else "#d97706"
+            action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
             
-            # Fetch requested fields
             open_p = p.get("open", 0)
             close_p = p.get("close", 0)
             high_p = p.get("high", 0) or 0
             low_p = p.get("low", 0) or 0
             target_p = p.get("target", 0) or 0
             sl_p = p.get("stop_loss", 0) or 0
-
-            # Calculate 1-10 rating based on heuristic
+            
+            pnl = p.get("pnl_pct")
+            pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
+            pnl_color = "#16a34a" if (pnl or 0) > 0 else "#dc2626" if (pnl or 0) < 0 else "#6b7280"
+            pnl_font_weight = "bold" if pnl is not None else "normal"
+            
+            # Rating calculation
             rating = 5  # default
             if pnl is not None:
                 if action == "BUY":
                     if pnl > 0:
-                        # Profit! How close to target?
                         if target_p > open_p and close_p >= target_p:
                             rating = 10
                         else:
-                            # partial profit
                             rating = 8
                     else:
-                        # Loss. Hit SL?
                         if sl_p > 0 and close_p <= sl_p:
                             rating = 0
                         else:
                             rating = 3
                 else: # WATCH / AVOID
                     if pnl < 0:
-                        # Successfully avoided a dropping stock
                         rating = 10
                     elif pnl > 0:
-                        # Missed a rally
                         rating = 3
                     else:
                         rating = 5
-
-            row_key = f"{i}. {p.get('name', '')} (Morning: {action})"
-            row_val = (
-                f"Open: Rs.{open_p:,.2f} | Target: Rs.{target_p:,.2f} | SL: Rs.{sl_p:,.2f} | "
-                f"High/Low: Rs.{high_p:,.2f}/Rs.{low_p:,.2f} | "
-                f"Close: Rs.{close_p:,.2f} | P&L: {pnl_str} | Rating: {rating}/10"
-            )
-            payload[row_key] = row_val
-
-        if getattr(config, "FORMSUBMIT_CC", ""):
-            payload["_cc"] = config.FORMSUBMIT_CC
-
-        response = requests.post(
-            endpoint,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Accept":       "application/json",
-                "Referer":      "http://localhost:8000/",
-            },
-            timeout=15,
-        )
-
-        if response.status_code == 200:
-            result = response.json()
-            if result.get("success") == "true" or result.get("success") is True:
-                logger.info(f"Email sent via Formsubmit to {config.FORMSUBMIT_TO}")
-            else:
-                # Usually means activation email was just sent
-                logger.warning(
-                    f"Formsubmit response: {result}. "
-                    f"If first send, check {config.FORMSUBMIT_TO} for activation email and click the link."
-                )
-        else:
-            logger.error(f"Formsubmit HTTP {response.status_code}: {response.text[:200]}")
-
-    except requests.exceptions.Timeout:
-        logger.error("Formsubmit request timed out")
+            
+            rating_color = "#16a34a" if rating >= 8 else "#d97706" if rating >= 5 else "#dc2626"
+            
+            rows_html += f"""
+            <tr style="border-bottom: 1px solid #e5e7eb;">
+                <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
+                <td style="padding: 12px 8px; text-align: center;">
+                    <span style="display: inline-block; padding: 4px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
+                        {action}
+                    </span>
+                </td>
+                <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #6b7280; font-size: 12px;">₹{high_p:,.2f} / ₹{low_p:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
+                <td style="padding: 12px 8px; text-align: center; color: {rating_color}; font-weight: bold; font-size: 15px;">{rating}<span style="font-size: 11px; color: #9ca3af;">/10</span></td>
+            </tr>
+            """
+            
+        html_body = f"""
+        <html>
+        <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
+            <div style="max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+                <!-- Header -->
+                <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 30px 24px; text-align: center; color: #ffffff;">
+                    <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">📊 END OF DAY REPORT</h1>
+                    <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; font-weight: 500;">Performance Audit & Trades Summary</p>
+                </div>
+                
+                <!-- Info Section -->
+                <div style="padding: 24px; background-color: #ffffff;">
+                    <!-- Key Cards -->
+                    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">30-Day Win Rate</div>
+                            <div style="font-size: 22px; font-weight: 800; color: #1e3b8a;">{win_rate:.1f}%</div>
+                        </div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Avg Daily P&L</div>
+                            <div style="font-size: 22px; font-weight: 800; color: #16a34a;">{avg_pnl:+.2f}%</div>
+                        </div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Results</div>
+                            <div style="font-size: 20px; font-weight: 800; color: #475569;">W: <span style="color:#16a34a;">{wins}</span> | L: <span style="color:#dc2626;">{losses}</span></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Table Title -->
+                    <h3 style="margin: 0 0 12px 0; color: #0f172a; font-weight: 700; font-size: 18px;">📈 Trade Execution & Analysis</h3>
+                    
+                    <!-- Table -->
+                    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
+                        <thead>
+                            <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; color: #475569; font-weight: bold;">
+                                <th style="padding: 10px 8px; text-align: left;">Stock</th>
+                                <th style="padding: 10px 8px; text-align: center;">Type</th>
+                                <th style="padding: 10px 8px; text-align: right;">Entry (Open)</th>
+                                <th style="padding: 10px 8px; text-align: right;">Exit (Close)</th>
+                                <th style="padding: 10px 8px; text-align: right;">High / Low</th>
+                                <th style="padding: 10px 8px; text-align: right;">P&L %</th>
+                                <th style="padding: 10px 8px; text-align: center;">Rating</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows_html}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Footer -->
+                <div style="background-color: #f9fafb; padding: 20px; text-align: center; border-top: 1px solid #f3f4f6; font-size: 12px; color: #9ca3af;">
+                    <p style="margin: 0;">Sent automatically by STALKER Server on Render.</p>
+                    <p style="margin: 5px 0 0 0;">This email is confidential and intended solely for the recipient.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        _send_via_brevo(subject, html_body)
     except Exception as e:
-        logger.error(f"Email send failed: {e}")
+        logger.error(f"EOD email failed to build: {e}")
 
 
 # ─────────────────────────────────────────────
