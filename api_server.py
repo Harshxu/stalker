@@ -479,6 +479,25 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
     Start the STALKER live dashboard server.
     Serves dashboard + API, polls live prices in background.
     """
+    # ⚠️  TEMPORARY — HEARTBEAT TEST MAILER — REMOVE AFTER TESTING ⚠️
+    # Must be started BEFORE os.chdir() below — otherwise import fails (wrong cwd).
+    # Sends "Yes, I'm active" email every 15 min to verify Render + Formsubmit.
+    try:
+        import test_heartbeat
+
+        def _run_heartbeat_loop():
+            test_heartbeat.send_heartbeat_email()       # fire immediately on boot
+            import time as _time
+            while True:
+                _time.sleep(test_heartbeat.HEARTBEAT_INTERVAL_MINUTES * 60)
+                test_heartbeat.send_heartbeat_email()
+
+        threading.Thread(target=_run_heartbeat_loop, daemon=True, name="HeartbeatMailer").start()
+        print("  [TEMP] Heartbeat mailer started — email every 15 min to verify uptime")
+    except Exception as _hb_err:
+        print(f"  [TEMP] Heartbeat mailer failed to start: {_hb_err}")
+    # ⚠️  END TEMPORARY BLOCK ⚠️
+
     # Change working dir to dashboard folder so static files are served
     dashboard_dir = os.path.join(config.BASE_DIR, "dashboard")
     os.chdir(dashboard_dir)
@@ -513,23 +532,7 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
     except Exception as e:
         print(f"  Failed to start background scheduler thread: {e}")
 
-    # ⚠️  TEMPORARY — HEARTBEAT TEST MAILER — REMOVE AFTER TESTING ⚠️
-    # Sends "Yes, I'm active" email every 15 min to verify Render + Formsubmit are alive.
-    try:
-        import test_heartbeat
 
-        def _run_heartbeat_loop():
-            test_heartbeat.send_heartbeat_email()          # fire immediately on boot
-            import time as _time
-            while True:
-                _time.sleep(test_heartbeat.HEARTBEAT_INTERVAL_MINUTES * 60)
-                test_heartbeat.send_heartbeat_email()
-
-        threading.Thread(target=_run_heartbeat_loop, daemon=True, name="HeartbeatMailer").start()
-        print("  [TEMP] Heartbeat mailer started — email every 15 min to verify uptime")
-    except Exception as _hb_err:
-        print(f"  [TEMP] Heartbeat mailer failed to start: {_hb_err}")
-    # ⚠️  END TEMPORARY BLOCK ⚠️
 
     # Open browser
     if open_browser:
