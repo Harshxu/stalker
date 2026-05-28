@@ -118,13 +118,45 @@ def run_morning_scan():
     logger.info("Morning email dispatch started")
 
     try:
-        # If pre-market scan didn't run (e.g. server just started), run it now
+        today_str = str(date.today())
+        
+        # 1. Check if memory has it (already loaded in same process)
+        # 2. Check if DB has today's picks (pre-computed at 7:00 AM)
+        # 3. Check if local latest_scan.json has today's picks
         if not _today_scan_result:
-            logger.info("No pre-market result found — running scan now...")
+            logger.info("No pre-market result in process memory — checking database...")
+            try:
+                db_picks = db_manager.get_today_picks()
+                if db_picks and db_picks.get("date") == today_str:
+                    logger.info("Found today's pre-computed picks in MongoDB!")
+                    _today_scan_result = db_picks
+                    picks = db_picks.get("picks", [])
+                    _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
+            except Exception as db_err:
+                logger.error(f"Failed to check MongoDB for pre-market picks: {db_err}")
+
+        if not _today_scan_result:
+            logger.info("Checking local latest_scan.json fallback...")
+            scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+            if os.path.exists(scan_path):
+                try:
+                    with open(scan_path) as f:
+                        local_data = json.load(f)
+                        if local_data and local_data.get("date") == today_str:
+                            logger.info("Found today's pre-computed picks in latest_scan.json!")
+                            _today_scan_result = local_data
+                            picks = local_data.get("top_picks", local_data.get("picks", []))
+                            _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
+                except Exception as json_err:
+                    logger.error(f"Failed to load local scan fallback: {json_err}")
+
+        # 4. If still empty (meaning 7:00 AM pre-market analysis failed or was skipped), run new scan
+        if not _today_scan_result:
+            logger.warning("No pre-computed 7:00 AM picks found in DB or local fallback. Initiating immediate scan...")
             result = screener.run_screen(top_n=config.TOP_PICKS_COUNT)
             _today_scan_result = result
             picks = result.get("top_picks", [])
-            _today_symbols_picked = [p["symbol"] for p in picks]
+            _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
             db_manager.save_daily_picks(result)
             scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
             with open(scan_path, "w") as f:
