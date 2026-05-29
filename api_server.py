@@ -837,21 +837,28 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
     t = threading.Thread(target=_refresh_cache, daemon=True)
     t.start()
 
-    # Start daily morning scan & EOD reporting scheduler thread
-    try:
-        import main
-        import schedule
-        main.setup_schedule()
-        
-        def _run_scheduler_loop():
-            while True:
-                schedule.run_pending()
-                time.sleep(30)
-                
-        threading.Thread(target=_run_scheduler_loop, daemon=True).start()
-        print("  Background daily scheduler activated (8:30 AM scan, EOD reporting auto-enabled)")
-    except Exception as e:
-        print(f"  Failed to start background scheduler thread: {e}")
+    # Start daily morning scan & EOD reporting scheduler thread only in production (Render)
+    # or if explicitly enabled locally (STALKER_RUN_SCHEDULER=true) to avoid duplicate emails.
+    is_render = os.getenv("RENDER") == "true"
+    run_scheduler = os.getenv("STALKER_RUN_SCHEDULER") == "true"
+
+    if is_render or run_scheduler:
+        try:
+            import main
+            import schedule
+            main.setup_schedule()
+            
+            def _run_scheduler_loop():
+                while True:
+                    schedule.run_pending()
+                    time.sleep(30)
+                    
+            threading.Thread(target=_run_scheduler_loop, daemon=True).start()
+            print("  Background daily scheduler activated (8:30 AM scan, EOD reporting auto-enabled)")
+        except Exception as e:
+            print(f"  Failed to start background scheduler thread: {e}")
+    else:
+        print("  Background scheduler bypassed (running locally, evening/morning emails handled by production server)")
 
 
 
