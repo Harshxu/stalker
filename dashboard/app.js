@@ -165,7 +165,7 @@ function showMarketClosedScreen(message) {
   if (picksGrid) picksGrid.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">No stocks listed — Market is closed.</div>';
   
   const tableBody = document.getElementById("live-table-body");
-  if (tableBody) tableBody.innerHTML = '<tr><td colspan="8" class="table-empty">No live stocks listed — Market is closed.</td></tr>';
+  if (tableBody) tableBody.innerHTML = '<tr><td colspan="9" class="table-empty">No live stocks listed — Market is closed.</td></tr>';
   
   // Zero active picks badge
   const badge = document.getElementById("picks-badge");
@@ -608,7 +608,7 @@ function renderLiveTable() {
   if (!activePage || !activePage.classList.contains("active")) return;
 
   if (!allPicks.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No picks loaded — run morning scan first</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="table-empty">No picks loaded — run morning scan first</td></tr>`;
     return;
   }
 
@@ -629,7 +629,7 @@ function renderLiveTable() {
       return `<tr>
         <td class="stock-name-cell"><strong>${tvLink}</strong><span>${pick.sector || ""}</span></td>
         <td><span class="action-badge ${ac}">${action}</span></td>
-        <td class="right mono" colspan="6" style="color:var(--text-muted)">Loading...</td>
+        <td class="right mono" colspan="7" style="color:var(--text-muted)">Loading...</td>
       </tr>`;
     }
 
@@ -648,6 +648,7 @@ function renderLiveTable() {
       <td class="right mono ${flashCls}">₹${fmt(live.price)}</td>
       <td class="right ${chgCls}">${live.change >= 0 ? "▲ +" : "▼ "}${live.change_pct}%</td>
       <td class="right mono">₹${fmt(pick.current_price)}</td>
+      <td class="right mono">${live.open_price ? `₹${fmt(live.open_price)}` : "Pending"}</td>
       <td class="right ${pnlCls}">${pnlStr}</td>
       <td class="right mono" style="color:var(--text-secondary)">₹${fmt(live.day_high)}</td>
       <td class="right mono" style="color:var(--text-secondary)">₹${fmt(live.day_low)}</td>
