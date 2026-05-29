@@ -129,6 +129,97 @@ def get_browser_session():
     return _global_session
 
 
+# ─────────────────────────────────────────────
+# NSE India Real-Time Price Fetcher
+# Fetches live prices directly from NSE India API (zero delay, truly real-time)
+# ─────────────────────────────────────────────
+
+_nse_session: Optional[requests.Session] = None
+_nse_session_created_at: float = 0.0
+NSE_SESSION_TTL = 10 * 60  # Re-init cookie every 10 minutes
+
+_NSE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.nseindia.com/",
+    "X-Requested-With": "XMLHttpRequest",
+    "Connection": "keep-alive",
+}
+
+def _get_nse_session() -> requests.Session:
+    """Create/refresh an NSE India session with valid cookies."""
+    global _nse_session, _nse_session_created_at
+    now = time.time()
+    if _nse_session is not None and (now - _nse_session_created_at) < NSE_SESSION_TTL:
+        return _nse_session
+
+    s = requests.Session()
+    s.headers.update(_NSE_HEADERS)
+    try:
+        # Hit the homepage first to get session cookies (NSE blocks without this)
+        s.get("https://www.nseindia.com", timeout=10)
+    except Exception as e:
+        logger.debug(f"NSE session init error: {e}")
+    _nse_session = s
+    _nse_session_created_at = now
+    return s
+
+
+def fetch_nse_live_price(symbol: str) -> Optional[Dict]:
+    """
+    Fetch real-time live price for a single NSE symbol from NSE India API.
+    symbol: NSE symbol with or without .NS suffix (e.g. 'ALKEM.NS' or 'ALKEM')
+    Returns dict with keys: last_price, prev_close, open, day_high, day_low, change, change_pct
+    Returns None on failure.
+    """
+    nse_sym = symbol.replace(".NS", "").replace(".BO", "").upper()
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={nse_sym}"
+    try:
+        sess = _get_nse_session()
+        resp = sess.get(url, timeout=8)
+        if resp.status_code != 200:
+            logger.debug(f"NSE API {nse_sym}: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        pi = data.get("priceInfo", {})
+        last_price = pi.get("lastPrice")
+        if not last_price:
+            return None
+        ih = pi.get("intraDayHighLow", {})
+        return {
+            "last_price":  float(last_price),
+            "prev_close":  float(pi.get("previousClose", 0)) or None,
+            "open":        float(pi.get("open", 0)) or None,
+            "day_high":    float(ih.get("max", 0)) or None,
+            "day_low":     float(ih.get("min", 0)) or None,
+            "change":      float(pi.get("change", 0)),
+            "change_pct":  float(pi.get("pChange", 0)),
+            "volume":      int(data.get("marketDeptOrderBook", {}).get("totalTradedVolume", 0) or 0),
+        }
+    except Exception as e:
+        logger.debug(f"NSE live price fetch failed for {nse_sym}: {e}")
+        return None
+
+
+def fetch_nse_live_prices(symbols: List[str]) -> Dict[str, Dict]:
+    """
+    Fetch real-time live prices for multiple NSE symbols.
+    Returns dict keyed by original symbol (e.g. 'ALKEM.NS').
+    Symbols that fail are simply omitted from the result.
+    """
+    results = {}
+    for sym in symbols:
+        data = fetch_nse_live_price(sym)
+        if data:
+            results[sym] = data
+        time.sleep(0.05)  # 50ms between requests — polite rate limiting
+    return results
+
+
+
+
 
 def is_nse_holiday(dt: date) -> bool:
     """
