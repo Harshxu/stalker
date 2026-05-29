@@ -13,6 +13,7 @@ Endpoints:
 """
 
 import json
+import math
 import os
 import sys
 import time
@@ -55,6 +56,19 @@ def _maybe_send_heartbeat():
 # ⚠️ END TEMPORARY
 
 # ─────────────────────────────────────────────
+# HELPERS
+# ─────────────────────────────────────────────
+
+def _safe_float(val, ndigits: int = 2):
+    """Return rounded float or None if val is None / NaN."""
+    try:
+        f = float(val)
+        return round(f, ndigits) if not math.isnan(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+# ─────────────────────────────────────────────
 # LIVE PRICE CACHE (updated every 20 seconds)
 # ─────────────────────────────────────────────
 _price_cache: Dict = {}
@@ -68,19 +82,51 @@ _tracked_symbols: List[str] = []
 
 def _fetch_live_prices(symbols: List[str]) -> Dict:
     """
-    Fetch the latest price and details for each symbol using yfinance history endpoint.
-    Avoids using ticker.info to prevent "Invalid Crumb" / 401 Unauthorized blocks on Render.
+    Fetch the latest LIVE price for each symbol using yfinance intraday candles.
+    Uses 1-minute candles during market hours for true real-time last traded price,
+    today's actual day high/low, and correct % change vs yesterday's close.
+    Falls back to fast_info (no crumb required) for serial resilience.
     """
     if not symbols:
         return {}
 
     results = {}
     total = len(symbols)
-    
+
+    # ── Determine if NSE market is currently open (IST) ──────────────────
+    from datetime import timezone, timedelta
+    IST_OFFSET = timedelta(hours=5, minutes=30)
+    now_ist = datetime.now(timezone.utc) + IST_OFFSET
+    now_mins = now_ist.hour * 60 + now_ist.minute
+    is_market_open = (
+        now_ist.weekday() < 5
+        and 9 * 60 + 15 <= now_mins <= 15 * 60 + 30
+        and not is_nse_holiday(now_ist.date())
+    )
+
+    # During market hours use 1m intraday candles → true last traded price.
+    # Outside market hours use daily candles → last session's close.
+    if is_market_open:
+        fetch_period   = "1d"
+        fetch_interval = "1m"
+        logger.debug("Market OPEN — fetching 1-minute intraday candles for live prices")
+    else:
+        fetch_period   = "5d"
+        fetch_interval = "1d"
+        logger.debug("Market CLOSED — fetching daily candles for last-session prices")
+
     try:
-        # Try primary parallel download using history endpoint (immune to crumb errors)
-        data = yf.download(symbols, period="5d", interval="1d", group_by="ticker", threads=True, progress=False, session=get_browser_session())
-        
+        session = get_browser_session()
+        data = yf.download(
+            symbols,
+            period=fetch_period,
+            interval=fetch_interval,
+            group_by="ticker",
+            threads=True,
+            progress=False,
+            session=session,
+        )
+
         for symbol in symbols:
             try:
                 if total == 1:
@@ -89,71 +135,77 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                     if symbol not in data.columns.levels[0]:
                         continue
                     df = data[symbol].copy()
-                
+
                 df.dropna(subset=["Close"], inplace=True)
                 if df.empty:
                     continue
-                
+
                 latest_row = df.iloc[-1]
-                last_price = latest_row["Close"]
-                day_high = latest_row["High"]
-                day_low = latest_row["Low"]
-                volume = latest_row["Volume"]
-                
+                last_price = float(latest_row["Close"])
+                day_high   = df["High"].max()    # True session high from all candles so far
+                day_low    = df["Low"].min()     # True session low from all candles so far
+                volume     = int(df["Volume"].sum()) if is_market_open else int(latest_row["Volume"])
+
+                # For % change: need yesterday's closing price.
+                # With 1m interval the entire df is today's session, so fetch a 2-day daily
+                # bar separately to get the previous close.
                 prev_close = None
-                if len(df) >= 2:
-                    prev_close = df.iloc[-2]["Close"]
-                
-                if last_price is None:
-                    continue
-                    
-                change = round(float(last_price - prev_close), 2) if prev_close else 0.0
-                change_pct = round(float((change / prev_close) * 100), 2) if prev_close else 0.0
-                
+                if is_market_open:
+                    try:
+                        daily_df = yf.download(
+                            symbol, period="2d", interval="1d",
+                            progress=False, session=get_browser_session()
+                        )
+                        daily_df.dropna(subset=["Close"], inplace=True)
+                        if len(daily_df) >= 2:
+                            prev_close = float(daily_df.iloc[-2]["Close"])
+                        elif len(daily_df) == 1:
+                            prev_close = float(daily_df.iloc[-1]["Open"])
+                    except Exception:
+                        pass
+                else:
+                    if len(df) >= 2:
+                        prev_close = float(df.iloc[-2]["Close"])
+
+                change     = round(last_price - prev_close, 2) if prev_close else 0.0
+                change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+
                 results[symbol] = {
                     "symbol":     symbol,
                     "name":       symbol.replace(".NS", "").replace(".BO", ""),
-                    "price":      round(float(last_price), 2),
-                    "prev_close": round(float(prev_close), 2) if prev_close else None,
+                    "price":      round(last_price, 2),
+                    "prev_close": round(prev_close, 2) if prev_close else None,
                     "change":     change,
                     "change_pct": change_pct,
-                    "day_high":   round(float(day_high), 2) if day_high else None,
-                    "day_low":    round(float(day_low), 2) if day_low else None,
-                    "volume":     int(volume) if volume else None,
+                    "day_high":   _safe_float(day_high),
+                    "day_low":    _safe_float(day_low),
+                    "volume":     volume,
                     "direction":  "up" if change >= 0 else "down",
                     "fetched_at": datetime.now().isoformat(),
                 }
-            except Exception as e:
-                logger.debug(f"Error parsing bulk data for {symbol}: {e}")
+            except Exception as inner_e:
+                logger.debug(f"Error parsing bulk data for {symbol}: {inner_e}")
                 continue
-                
+
     except Exception as bulk_err:
-        logger.warning(f"Bulk download failed: {bulk_err}. Falling back to serial history fetching.")
-        # Fallback: Serial fetching using history API (also resilient to crumb errors)
+        logger.warning(f"Bulk download failed: {bulk_err}. Falling back to serial fast_info fetching.")
+        # Fallback: fast_info is crumb-free and very lightweight
         for symbol in symbols:
             try:
                 ticker = yf.Ticker(symbol, session=get_browser_session())
-                df = ticker.history(period="5d")
-                df.dropna(subset=["Close"], inplace=True)
-                if df.empty:
-                    continue
-                    
-                latest_row = df.iloc[-1]
-                last_price = latest_row["Close"]
-                day_high = latest_row["High"]
-                day_low = latest_row["Low"]
-                volume = latest_row["Volume"]
-                
-                prev_close = None
-                if len(df) >= 2:
-                    prev_close = df.iloc[-2]["Close"]
-                
+                fi = ticker.fast_info   # fast_info does NOT require cookie/crumb
+                last_price = fi.last_price
+                prev_close = fi.previous_close
+                day_high   = fi.day_high
+                day_low    = fi.day_low
+                volume     = fi.three_month_average_volume   # fast_info has no day volume; skip
+
                 if last_price is None:
                     continue
-                    
-                change = round(float(last_price - prev_close), 2) if prev_close else 0.0
+
+                change     = round(float(last_price - prev_close), 2) if prev_close else 0.0
                 change_pct = round(float((change / prev_close) * 100), 2) if prev_close else 0.0
-                
+
                 results[symbol] = {
                     "symbol":     symbol,
                     "name":       symbol.replace(".NS", "").replace(".BO", ""),
@@ -163,14 +215,14 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                     "change_pct": change_pct,
                     "day_high":   round(float(day_high), 2) if day_high else None,
                     "day_low":    round(float(day_low), 2) if day_low else None,
-                    "volume":     int(volume) if volume else None,
+                    "volume":     None,
                     "direction":  "up" if change >= 0 else "down",
                     "fetched_at": datetime.now().isoformat(),
                 }
-                time.sleep(0.15)
+                time.sleep(0.2)
             except Exception as serial_err:
-                logger.error(f"Failed to fetch serial history for {symbol}: {serial_err}")
-                
+                logger.error(f"Failed to fetch fast_info for {symbol}: {serial_err}")
+
     return results
 
 
