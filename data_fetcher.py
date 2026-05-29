@@ -16,20 +16,63 @@ from typing import Dict, List, Optional, Tuple
 import config
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
+# Global requests session to enable connection pooling & persistent cookies
+_global_session = None
+
+# Rate limiting protection state (cooldown of 30 minutes)
+_rate_limit_cooldown_until = 0.0
+COOLDOWN_DURATION_SEC = 30 * 60
+
+def mark_rate_limited():
+    """Mark that we are rate limited and start cooldown."""
+    global _rate_limit_cooldown_until
+    _rate_limit_cooldown_until = time.time() + COOLDOWN_DURATION_SEC
+    logger.warning(f"Yahoo Finance rate limit hit! Pausing all yfinance network calls for {COOLDOWN_DURATION_SEC // 60} minutes.")
+
+def is_rate_limited() -> bool:
+    """Check if we are currently in rate-limiting cooldown."""
+    global _rate_limit_cooldown_until
+    if _rate_limit_cooldown_until > 0:
+        remaining = _rate_limit_cooldown_until - time.time()
+        if remaining > 0:
+            return True
+        else:
+            # Cooldown expired
+            _rate_limit_cooldown_until = 0.0
+    return False
+
 def get_browser_session():
-    """Create a requests session with browser headers to prevent anti-bot blocking on cloud IPs."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-    })
-    return session
+    """Get or create a reusable requests session with browser headers, connection pooling, and automatic retries."""
+    global _global_session
+    if _global_session is None:
+        _global_session = requests.Session()
+        
+        # Configure retries with exponential backoff on transient errors and rate limits (429)
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS"]
+        )
+        
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        _global_session.mount("https://", adapter)
+        _global_session.mount("http://", adapter)
+        
+        _global_session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
+    return _global_session
+
 
 
 def is_nse_holiday(dt: date) -> bool:
@@ -72,6 +115,10 @@ def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") 
     Fetch historical OHLCV data for a stock.
     Returns DataFrame with columns: Open, High, Low, Close, Volume
     """
+    if is_rate_limited():
+        logger.debug(f"Skipping history fetch for {symbol} due to active rate-limit cooldown.")
+        return None
+
     try:
         ticker = yf.Ticker(symbol, session=get_browser_session())
         df = ticker.history(period=period, interval=interval, auto_adjust=True)
@@ -92,6 +139,9 @@ def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") 
         return df
 
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Error fetching history for {symbol}: {e}")
         return None
 
@@ -105,6 +155,11 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
     import gc
     results = {}
     total = len(symbols)
+    
+    if is_rate_limited():
+        logger.warning("Skipping multiple stocks bulk fetch due to active rate-limit cooldown.")
+        return {}
+
     logger.info(f"Fetching data for {total} symbols in chunked parallel batches to prevent memory leaks...")
 
     # Chunk size of 15 keeps memory overhead extremely low (under 120MB)
@@ -112,6 +167,9 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
     chunks = [symbols[i:i + chunk_size] for i in range(0, total, chunk_size)]
 
     for chunk_idx, chunk in enumerate(chunks):
+        if is_rate_limited():
+            logger.warning("Aborting bulk fetch batch loop due to rate limit hit in previous batch.")
+            break
         try:
             logger.info(f"  Downloading batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} symbols)...")
             data = yf.download(chunk, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
@@ -153,8 +211,13 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
             time.sleep(0.8)
 
         except Exception as e:
+            err_msg = str(e)
+            if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+                mark_rate_limited()
             logger.error(f"Bulk download batch {chunk_idx + 1} failed, falling back to serial: {e}")
             for symbol in chunk:
+                if is_rate_limited():
+                    break
                 df = fetch_stock_history(symbol, period=period)
                 if df is not None:
                     results[symbol] = df
@@ -215,6 +278,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
             _fundamentals_cache = {}
             
     # Return from cache if available
+    is_blocked = is_rate_limited()
     if symbol in _fundamentals_cache:
         # Check if the cache is older than 7 days
         cached_entry = _fundamentals_cache[symbol]
@@ -222,11 +286,12 @@ def fetch_fundamentals(symbol: str) -> Dict:
         if cached_time:
             try:
                 age = (datetime.now() - datetime.fromisoformat(cached_time)).days
-                if age < 7:
-                    # Return cached metrics
+                if age < 7 or is_blocked:
+                    # Return cached metrics (accept any age if blocked to avoid network requests)
                     return cached_entry["data"]
             except Exception:
-                pass
+                if is_blocked:
+                    return cached_entry["data"]
 
     defaults = {
         "symbol": symbol,
@@ -251,6 +316,10 @@ def fetch_fundamentals(symbol: str) -> Dict:
         "has_recent_earnings": False,
         "earnings_surprise": None,
     }
+
+    if is_blocked:
+        logger.debug(f"Skipping fundamentals network fetch for {symbol} due to active rate-limit cooldown.")
+        return defaults
 
     try:
         ticker = yf.Ticker(symbol, session=get_browser_session())
@@ -306,7 +375,13 @@ def fetch_fundamentals(symbol: str) -> Dict:
         return fundamentals
 
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Error fetching fundamentals for {symbol}: {e}")
+        # Fallback to cache even if stale since network failed
+        if symbol in _fundamentals_cache:
+            return _fundamentals_cache[symbol]["data"]
         return defaults
 
 
@@ -319,6 +394,10 @@ def fetch_current_quote(symbol: str) -> Dict:
     Get the latest quote (current/last price, open, high, low, volume).
     Used during market hours to capture open and close prices.
     """
+    if is_rate_limited():
+        logger.debug(f"Skipping quote fetch for {symbol} due to active rate-limit cooldown.")
+        return {"symbol": symbol, "timestamp": datetime.now().isoformat(), "current_price": None}
+
     try:
         ticker = yf.Ticker(symbol, session=get_browser_session())
         info = ticker.info
@@ -335,6 +414,9 @@ def fetch_current_quote(symbol: str) -> Dict:
             "avg_volume": info.get("averageVolume"),
         }
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Error fetching quote for {symbol}: {e}")
         return {"symbol": symbol, "timestamp": datetime.now().isoformat(), "current_price": None}
 
@@ -351,6 +433,10 @@ def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dic
     # Strict holiday / closed day check
     if is_nse_holiday(date.today()) and not allow_historical:
         logger.warning(f"Today is a weekend or NSE trading holiday. Skipping open prices.")
+        return {}
+
+    if is_rate_limited():
+        logger.warning("Skipping open prices fetch due to active rate-limit cooldown.")
         return {}
 
     prices = {}
@@ -407,6 +493,9 @@ def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dic
                 except Exception as e:
                     logger.debug(f"Failed to extract bulk open price for {symbol}: {e}")
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Bulk open download failed: {e}")
         
     # Fill in any missing symbols using the traditional sequential fallback
@@ -414,6 +503,8 @@ def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dic
     if missing_symbols:
         logger.info(f"Falling back to serial fetching for {len(missing_symbols)} missing stocks...")
         for symbol in missing_symbols:
+            if is_rate_limited():
+                break
             try:
                 quote = fetch_current_quote(symbol)
                 prices[symbol] = quote
@@ -437,6 +528,10 @@ def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Di
     # Strict holiday / closed day check
     if is_nse_holiday(date.today()) and not allow_historical:
         logger.warning(f"Today is a weekend or NSE trading holiday. Skipping close prices.")
+        return {}
+
+    if is_rate_limited():
+        logger.warning("Skipping close prices fetch due to active rate-limit cooldown.")
         return {}
 
     prices = {}
@@ -492,6 +587,9 @@ def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Di
                 except Exception as e:
                     logger.debug(f"Failed to extract bulk close price for {symbol}: {e}")
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Bulk close download failed: {e}")
         
     # Fill in any missing symbols using the traditional sequential fallback
@@ -499,6 +597,8 @@ def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Di
     if missing_symbols:
         logger.info(f"Falling back to serial fetching for {len(missing_symbols)} missing stocks...")
         for symbol in missing_symbols:
+            if is_rate_limited():
+                break
             try:
                 quote = fetch_current_quote(symbol)
                 if quote and quote.get("current_price"):
@@ -545,17 +645,19 @@ def fetch_news_signals(symbol: str) -> Dict:
         else:
             _news_cache = {}
 
-    # Return from cache if available and fresh (less than 4 hours old)
+    is_blocked = is_rate_limited()
+    # Return from cache if available and fresh (less than 4 hours old) or if rate limited
     if symbol in _news_cache:
         cached_entry = _news_cache[symbol]
         cached_time = cached_entry.get("_cached_at")
         if cached_time:
             try:
                 age_hours = (datetime.now() - datetime.fromisoformat(cached_time)).total_seconds() / 3600
-                if age_hours < 4:
+                if age_hours < 4 or is_blocked:
                     return cached_entry["data"]
             except Exception:
-                pass
+                if is_blocked:
+                    return cached_entry["data"]
 
     signals = {
         "symbol": symbol,
@@ -565,6 +667,10 @@ def fetch_news_signals(symbol: str) -> Dict:
         "headlines": [],
         "catalysts": [],
     }
+
+    if is_blocked:
+        logger.debug(f"Skipping news network fetch for {symbol} due to active rate-limit cooldown.")
+        return signals
 
     try:
         ticker = yf.Ticker(symbol, session=get_browser_session())
@@ -643,7 +749,12 @@ def fetch_news_signals(symbol: str) -> Dict:
             pass
 
     except Exception as e:
+        err_msg = str(e)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+            mark_rate_limited()
         logger.error(f"Error fetching news for {symbol}: {e}")
+        if symbol in _news_cache:
+            return _news_cache[symbol]["data"]
 
     return signals
 

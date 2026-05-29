@@ -27,7 +27,7 @@ from typing import Dict, List, Optional
 import yfinance as yf
 
 import config
-from data_fetcher import get_browser_session, is_nse_holiday
+from data_fetcher import get_browser_session, is_nse_holiday, is_rate_limited, mark_rate_limited
 import db_manager
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,10 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     results = {}
     total = len(symbols)
 
+    if is_rate_limited():
+        logger.debug("Skipping live price fetch due to active rate-limit cooldown.")
+        return {}
+
     # Determine if NSE market is currently open (IST)
     from datetime import timezone, timedelta
     IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -135,33 +139,42 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
             except Exception:
                 pass
     except Exception as daily_err:
+        err_msg = str(daily_err)
+        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(daily_err).__name__.lower():
+            mark_rate_limited()
         logger.warning(f"Daily bulk pre-fetch failed: {daily_err}")
 
     # Step 2: If market is open, fetch 1m intraday for live price + today's H/L
     intraday: dict = {}
     if is_market_open:
-        try:
-            intraday_bulk = yf.download(
-                symbols, period="1d", interval="1m",
-                group_by="ticker", threads=True, progress=False,
-                session=get_browser_session(),
-            )
-            for sym in symbols:
-                try:
-                    df_m = intraday_bulk[sym].copy() if total > 1 else intraday_bulk
-                    df_m.dropna(subset=["Close"], inplace=True)
-                    if df_m.empty:
-                        continue
-                    intraday[sym] = {
-                        "last_price": float(df_m.iloc[-1]["Close"]),
-                        "day_high":   float(df_m["High"].max()),
-                        "day_low":    float(df_m["Low"].min()),
-                        "volume":     int(df_m["Volume"].sum()),
-                    }
-                except Exception:
-                    pass
-        except Exception as intra_err:
-            logger.warning(f"Intraday 1m bulk failed: {intra_err}")
+        if is_rate_limited():
+            logger.debug("Skipping open market intraday download due to rate limit cooldown.")
+        else:
+            try:
+                intraday_bulk = yf.download(
+                    symbols, period="1d", interval="1m",
+                    group_by="ticker", threads=True, progress=False,
+                    session=get_browser_session(),
+                )
+                for sym in symbols:
+                    try:
+                        df_m = intraday_bulk[sym].copy() if total > 1 else intraday_bulk
+                        df_m.dropna(subset=["Close"], inplace=True)
+                        if df_m.empty:
+                            continue
+                        intraday[sym] = {
+                            "last_price": float(df_m.iloc[-1]["Close"]),
+                            "day_high":   float(df_m["High"].max()),
+                            "day_low":    float(df_m["Low"].min()),
+                            "volume":     int(df_m["Volume"].sum()),
+                        }
+                    except Exception:
+                        pass
+            except Exception as intra_err:
+                err_msg = str(intra_err)
+                if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(intra_err).__name__.lower():
+                    mark_rate_limited()
+                logger.warning(f"Intraday 1m bulk failed: {intra_err}")
 
     # Step 3: Build results from what we have
     handled = set()
@@ -214,58 +227,68 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     # Step 4: Serial fast_info retry for any symbols still missing
     missing = [s for s in symbols if s not in handled]
     if missing:
-        logger.info(f"Retrying {len(missing)} missing symbols via serial history/fast_info: {missing}")
-        for symbol in missing:
-            try:
-                ticker    = yf.Ticker(symbol, session=get_browser_session())
-                last_price = None
-                prev_close = None
-                day_high   = None
-                day_low    = None
-
-                # Try fast_info first (lightweight, but can crash on some symbols)
+        if is_rate_limited():
+            logger.debug("Skipping serial retry fallback for live prices due to active rate-limit cooldown.")
+        else:
+            logger.info(f"Retrying {len(missing)} missing symbols via serial history/fast_info: {missing}")
+            for symbol in missing:
+                if is_rate_limited():
+                    break
                 try:
-                    fi         = ticker.fast_info
-                    last_price = _safe_float(fi.last_price)
-                    prev_close = _safe_float(fi.previous_close)
-                    day_high   = _safe_float(fi.day_high)
-                    day_low    = _safe_float(fi.day_low)
-                except Exception:
-                    pass
+                    ticker    = yf.Ticker(symbol, session=get_browser_session())
+                    last_price = None
+                    prev_close = None
+                    day_high   = None
+                    day_low    = None
 
-                # Fall back to ticker.history if fast_info failed
-                if last_price is None:
+                    # Try fast_info first (lightweight, but can crash on some symbols)
                     try:
-                        df_hist = ticker.history(period="5d")
-                        df_hist.dropna(subset=["Close"], inplace=True)
-                        if not df_hist.empty:
-                            last_price = float(df_hist.iloc[-1]["Close"])
-                            if len(df_hist) >= 2:
-                                prev_close = float(df_hist.iloc[-2]["Close"])
+                        fi         = ticker.fast_info
+                        last_price = _safe_float(fi.last_price)
+                        prev_close = _safe_float(fi.previous_close)
+                        day_high   = _safe_float(fi.day_high)
+                        day_low    = _safe_float(fi.day_low)
                     except Exception:
                         pass
 
-                if last_price is None:
-                    continue
+                    # Fall back to ticker.history if fast_info failed
+                    if last_price is None:
+                        try:
+                            df_hist = ticker.history(period="5d")
+                            df_hist.dropna(subset=["Close"], inplace=True)
+                            if not df_hist.empty:
+                                last_price = float(df_hist.iloc[-1]["Close"])
+                                if len(df_hist) >= 2:
+                                    prev_close = float(df_hist.iloc[-2]["Close"])
+                        except Exception:
+                            pass
 
-                change     = round(last_price - prev_close, 2) if prev_close else 0.0
-                change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
-                results[symbol] = {
-                    "symbol":     symbol,
-                    "name":       symbol.replace(".NS", "").replace(".BO", ""),
-                    "price":      last_price,
-                    "prev_close": prev_close,
-                    "change":     change,
-                    "change_pct": change_pct,
-                    "day_high":   day_high,
-                    "day_low":    day_low,
-                    "volume":     None,
-                    "direction":  "up" if change >= 0 else "down",
-                    "fetched_at": datetime.now().isoformat(),
-                }
-                time.sleep(0.2)
-            except Exception as fe:
-                logger.error(f"Serial fallback failed for {symbol}: {fe}")
+                    if last_price is None:
+                        continue
+
+                    change     = round(last_price - prev_close, 2) if prev_close else 0.0
+                    change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+                    results[symbol] = {
+                        "symbol":     symbol,
+                        "name":       symbol.replace(".NS", "").replace(".BO", ""),
+                        "price":      last_price,
+                        "prev_close": prev_close,
+                        "change":     change,
+                        "change_pct": change_pct,
+                        "day_high":   day_high,
+                        "day_low":    day_low,
+                        "volume":     None,
+                        "direction":  "up" if change >= 0 else "down",
+                        "fetched_at": datetime.now().isoformat(),
+                    }
+                    time.sleep(0.2)
+                except Exception as fe:
+                    err_msg = str(fe)
+                    if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(fe).__name__.lower():
+                        mark_rate_limited()
+                    logger.error(f"Serial fallback failed for {symbol}: {fe}")
+
+    return results
 
     return results
 

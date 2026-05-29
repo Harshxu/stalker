@@ -1,8 +1,7 @@
-"""
-STALKER - Master Scoring & Screener Engine
-The brain of the system. Picks the top 10–15 stocks from the universe.
-All complex logic stays here. Users see only the final results.
-"""
+import sys, io
+# Force UTF-8 output on Windows to handle special chars
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 import logging
 import time
@@ -59,9 +58,76 @@ def is_disqualified(symbol: str, df_hist, fund: Dict, indic: Dict, ms: Dict) -> 
     return False, ""
 
 
-# ─────────────────────────────────────────────
-# MASTER SCORING ENGINE (0–100)
-# ─────────────────────────────────────────────
+def pre_score_stock(symbol: str, df_hist, indic: Dict, ms: Dict, market_is_bullish: bool) -> float:
+    """Calculate the technical-only score for pre-filtering (max 90 pts)."""
+    tech_score = 0.0
+
+    # ── 1. MARKET STRUCTURE (25 pts) ─────────────────
+    struct_score = ms_module.get_structure_score(ms)
+    tech_score += struct_score
+
+    # ── 2. VOLUME (20 pts) ───────────────────────────
+    vol_ratio = indic.get("volume_ratio", 1.0)
+    if vol_ratio >= 3.0:
+        vol_score = 20
+    elif vol_ratio >= 2.0:
+        vol_score = 17
+    elif vol_ratio >= 1.5:
+        vol_score = 13
+    elif vol_ratio >= 1.0:
+        vol_score = 7
+    else:
+        vol_score = 2
+    tech_score += vol_score
+
+    # ── 3. TECHNICAL SETUP (20 pts) ──────────────────
+    t_score = 0.0
+    if indic.get("above_vwap"):         t_score += 6
+    if indic.get("ema_aligned"):        t_score += 5
+    if indic.get("ema_slope_up"):       t_score += 3
+    if indic.get("rsi_healthy"):        t_score += 4
+    if indic.get("macd_bullish"):       t_score += 2
+    tech_score += min(20, t_score)
+
+    # ── 4. MOMENTUM (15 pts) ─────────────────────────
+    mom_score = 0.0
+    gap_pct = indic.get("gap_pct", 0)
+    rs_vs_nifty = indic.get("rs_vs_nifty", 0)
+    ohl_signal  = indic.get("ohl_signal", "neutral")
+    dist_52w    = indic.get("dist_52w_high", -100)
+
+    if gap_pct >= config.GAP_UP_THRESHOLD:    mom_score += 4
+    elif gap_pct > 0:                          mom_score += 2
+
+    if rs_vs_nifty >= 3:                       mom_score += 4
+    elif rs_vs_nifty >= 1:                     mom_score += 2
+
+    if ohl_signal == "bullish":                mom_score += 3
+    elif ohl_signal == "bearish":              mom_score -= 2
+
+    if dist_52w >= -5:                         mom_score += 4
+    elif dist_52w >= -15:                      mom_score += 2
+
+    if market_is_bullish:                      mom_score += 2
+
+    tech_score += max(0, min(15, mom_score))
+
+    # ── 5. RISK/REWARD (10 pts) ──────────────────────
+    entry     = indic.get("close", 0)
+    atr       = indic.get("atr", entry * 0.01)
+    swing_sup = ms.get("swing_support")
+    stop_loss = rm.calculate_stop_loss(entry, atr, swing_sup)
+    targets   = rm.calculate_targets(entry, stop_loss)
+    rr_ratio  = targets.get("rr_ratio", 0)
+
+    if rr_ratio >= 3.0:       rr_score = 10
+    elif rr_ratio >= 2.0:     rr_score = 8
+    elif rr_ratio >= 1.5:     rr_score = 5
+    else:                     rr_score = 2
+    tech_score += rr_score
+
+    return tech_score
+
 
 def score_stock(symbol: str, df_hist, fund: Dict, indic: Dict,
                 ms: Dict, news: Dict, market_is_bullish: bool,
@@ -318,10 +384,9 @@ def run_screen(symbols: Optional[List[str]] = None,
     print(f"\n📥 Fetching price data for {len(symbols)} stocks...")
     all_history = df_module.fetch_multiple_stocks(symbols)
 
-    # ── Step 3: Score Each Stock ──────────────────────
-    results = []
-    qualified = 0
-    print(f"\n🔍 Analysing {len(all_history)} stocks...")
+    # ── Step 3: Score Each Stock (Pass 1 - Technical Pre-screening) ──────────────────────
+    print(f"\n🔍 Analysing {len(all_history)} stocks (Pass 1 - Technical Pre-screening)...")
+    candidates = []
 
     for i, symbol in enumerate(symbols, 1):
         df_hist = all_history.get(symbol)
@@ -342,9 +407,44 @@ def run_screen(symbols: Optional[List[str]] = None,
             if disq:
                 continue
 
+            # Pre-score technical performance
+            tech_score = pre_score_stock(symbol, df_hist, indic, ms, market_is_bullish)
+            
+            candidates.append({
+                "symbol": symbol,
+                "df_hist": df_hist,
+                "indic": indic,
+                "ms": ms,
+                "tech_score": tech_score
+            })
+
+        except Exception as e:
+            logger.error(f"Error in technical pre-screening for {symbol}: {e}")
+            continue
+
+    # Sort candidates by technical score descending
+    candidates.sort(key=lambda x: x["tech_score"], reverse=True)
+    
+    # We only fetch fundamentals and news for the top candidate pool (top 35 stocks)
+    # The maximum impact from fundamentals & news is +15 points, so any stock more than 20 points
+    # below the 15th stock could never beat it. A pool of 35 is mathematically complete.
+    eval_pool = candidates[:35]
+    print(f"\n📋 Selected top {len(eval_pool)} candidates for full fundamentals and news analysis (Pass 2)...")
+
+    # ── Step 4: Full Score for Candidate Pool (Pass 2) ──────────────────────
+    results = []
+    qualified = 0
+
+    for i, item in enumerate(eval_pool, 1):
+        symbol = item["symbol"]
+        df_hist = item["df_hist"]
+        indic = item["indic"]
+        ms = item["ms"]
+
+        try:
             # Fundamentals
             fund = df_module.fetch_fundamentals(symbol)
-            time.sleep(0.2)
+            time.sleep(0.15)
 
             # News
             news = df_module.fetch_news_signals(symbol)
@@ -365,10 +465,10 @@ def run_screen(symbols: Optional[List[str]] = None,
             results.append(result)
 
         except Exception as e:
-            logger.error(f"Error scoring {symbol}: {e}")
+            logger.error(f"Error in detailed scoring for {symbol}: {e}")
             continue
 
-    # ── Step 4: Sort & Return Top N ──────────────────
+    # ── Step 5: Sort & Return Top N ──────────────────
     results.sort(key=lambda x: x["total_score"], reverse=True)
     top_picks = results[:top_n]
 
