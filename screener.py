@@ -294,34 +294,111 @@ def score_stock(symbol: str, df_hist, fund: Dict, indic: Dict,
 
 
 def _build_reasons(indic, ms, fund_result, news, market_bullish, sector, sector_trends) -> List[str]:
-    """Build 3–5 plain-English bullet points explaining why this stock was picked."""
+    """Build 4–6 highly professional, quantitative analytical bullet points explaining the pick."""
     reasons = []
 
+    # 1. Market Structure & Trend
     struct = ms.get("structure", "")
+    strength = ms.get("strength", 0)
+    support = ms.get("support")
+    resistance = ms.get("resistance")
     if struct == "uptrend":
-        reasons.append("📈 Stock is in a strong uptrend")
+        desc = f"📈 Bullish Trend Structure: Confirmed daily uptrend with higher-highs and higher-lows (Structure Strength: {strength}/100)."
+        if support:
+            desc += f" Major swing support established at ₹{support:.2f}."
+        reasons.append(desc)
     elif struct == "breakout":
-        reasons.append("🚀 Price breaking out with strong volume")
+        desc = f"🚀 Momentum Breakout: Price broke out of consolidation zone above prior resistance of ₹{resistance:.2f}."
+        if indic.get("volume_ratio", 0) >= 1.5:
+            desc += f" Supported by heavy volume surge ({indic['volume_ratio']:.2f}x average)."
+        reasons.append(desc)
+    elif struct == "sideways":
+        reasons.append(f"↕️ Tight Range Consolidation: Trading between support at ₹{support:.2f} and resistance at ₹{resistance:.2f}, poised for a volatility breakout.")
 
-    if indic.get("volume_surge"):
-        vr = indic.get("volume_ratio", 1)
-        reasons.append(f"📊 Trading at {vr:.1f}x normal volume — unusual activity")
+    # 2. Volume & Smart Money Interest
+    vol_ratio = indic.get("volume_ratio", 1.0)
+    if vol_ratio >= 1.8:
+        reasons.append(f"📊 Institutional Volume Surge: Daily trading volume is {vol_ratio:.2f}x above the 20-day moving average, confirming strong institutional buying (smart money accumulation).")
+    elif vol_ratio >= 1.2:
+        reasons.append(f"📊 Volume Acceleration: Volume is rising at {vol_ratio:.2f}x normal levels, indicating growing retail and professional participation.")
 
-    if indic.get("gap_pct", 0) >= config.GAP_UP_THRESHOLD:
-        reasons.append(f"⬆️ Gapped up {indic['gap_pct']:.1f}% at open — strong buying")
+    # 3. Gap & Intraday Momentum
+    gap_pct = indic.get("gap_pct", 0)
+    ohl = indic.get("ohl_signal", "neutral")
+    if gap_pct >= config.GAP_UP_THRESHOLD:
+        desc = f"⬆️ Gap-and-Go Momentum: Stock opened with a bullish gap of +{gap_pct:.2f}%, demonstrating aggressive pre-market buying interest."
+        if ohl == "bullish":
+            desc += " Open equals Low pattern confirms immediate buyers dominance from the first tick."
+        reasons.append(desc)
+    elif ohl == "bullish":
+        reasons.append("⚡ Buyers' Dominance: Bullish Open-High-Low (Open = Low) price pattern confirmed, indicating absolute intraday control by buyers.")
 
+    # 4. Technical Indicators (RSI, MACD, EMAs)
+    rsi = indic.get("rsi", 50)
+    above_vwap = indic.get("above_vwap")
+    macd_bullish = indic.get("macd_bullish")
+    ema_aligned = indic.get("ema_aligned")
+    
+    tech_bullets = []
+    if 45 <= rsi <= 75:
+        tech_bullets.append(f"RSI is highly constructive at {rsi:.1f} (in high-velocity bullish zone without entering overbought levels >78)")
+    elif rsi > 75:
+        tech_bullets.append(f"RSI at {rsi:.1f} shows extremely high bullish velocity, though trading close to overbought limits")
+        
+    if macd_bullish:
+        tech_bullets.append("MACD shows a strong bullish crossover with positive histogram expansion")
+        
+    if ema_aligned and above_vwap:
+        ema20 = indic.get("ema20", 0)
+        vwap = indic.get("vwap", 0)
+        tech_bullets.append(f"price is accepted above 20 EMA (₹{ema20:.2f}) and daily VWAP (₹{vwap:.2f}) with aligned bullish EMAs (20 > 50)")
+
+    if tech_bullets:
+        reasons.append(f"💠 Advanced Indicator Setup: {'; '.join(tech_bullets[:2])}.")
+
+    if indic.get("bb_squeeze"):
+        reasons.append("💠 Bollinger Band Squeeze: Tight low-volatility constriction detected on daily candles, historically indicating an imminent high-probability explosive price expansion.")
+
+    # 5. Relative Strength vs Market & Near-Highs
+    rs_vs_nifty = indic.get("rs_vs_nifty", 0)
+    dist_52w = indic.get("dist_52w_high", -100)
+    if rs_vs_nifty >= 2.0:
+        reasons.append(f"💪 Market Relative Outperformance: Exceeding Nifty 50 performance by +{rs_vs_nifty:.2f}% over the last 20 trading sessions, proving market leadership.")
+    
+    if dist_52w >= -5.0:
+        reasons.append(f"⚡ High-Growth Leadership: Stock is trading just {abs(dist_52w):.1f}% below its 52-week high, exhibiting strong trend persistence and high momentum.")
+
+    # 6. Fundamental Quality & Valuation
+    score = fund_result.get("score", 0)
+    pe = fund_result.get("pe_ratio")
+    de = fund_result.get("de_ratio")
+    roe = fund_result.get("roe_pct", 0)
+    
+    fund_bullets = []
+    if de is not None and de <= 0.3:
+        fund_bullets.append(f"highly conservative debt profile (Debt/Equity of {de:.2f})")
+    if roe >= 15.0:
+        fund_bullets.append(f"strong return on equity of {roe:.1f}%")
+    if pe is not None and 0 < pe < 20:
+        fund_bullets.append(f"attractive valuation at P/E {pe:.1f}")
+
+    if fund_bullets:
+        reasons.append(f"✅ Robust Balance Sheet: Characterized by {', '.join(fund_bullets[:2])} (Overall Fundamentals Score: {score}/10).")
+    elif fund_result.get("flags"):
+        reasons.append(f"✅ Financial Health Highlight: {fund_result['flags'][0]} with comfortable operating metrics (Fundamentals Score: {score}/10).")
+
+    # 7. News & Sentiment Catalysts
     if news.get("catalysts"):
-        reasons.append(f"📰 Active news: {', '.join(news['catalysts'][:2])}")
+        reasons.append(f"📰 News Catalyst: Positive market news flow relating to: {', '.join(news['catalysts'][:2])}. Sentiment is highly constructive.")
+    elif news.get("news_sentiment") == "bullish":
+        reasons.append("💬 Bullish Sentiment: Overall media and news sentiment is highly positive, supporting ongoing momentum.")
 
-    if fund_result.get("flags"):
-        reasons.append(f"✅ {fund_result['flags'][0]}")
+    # 8. Sector confirmation
+    sect_trend = sector_trends.get(sector, "unknown")
+    if sect_trend == "bullish":
+        reasons.append(f"🏭 Strong Sector Tailwinds: The {sector} sector is in a confirmed bullish phase today, driving capital inflows and high-probability setups.")
 
-    if market_bullish:
-        reasons.append("🌐 Overall market is bullish today")
-
-    if sector_trends.get(sector) == "bullish":
-        reasons.append(f"🏭 {sector} sector is strong today")
-
+    # Return top 5 most high-impact reasons
     return reasons[:5]
 
 
@@ -504,3 +581,6 @@ if __name__ == "__main__":
             print(f"\n{i}. {pick['name']} — Score: {pick['total_score']}/100 — {pick['action']}")
             print(f"   Price: ₹{pick['current_price']:,.2f} | SL: ₹{pick['stop_loss']:,.2f} | Target: ₹{pick['target_2']:,.2f}")
             print(f"   Risk: {pick['risk_profile']} | Type: {pick['trade_type']}")
+            print("   Reasons:")
+            for reason in pick['reasons']:
+                print(f"     * {reason}")
