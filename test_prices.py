@@ -256,7 +256,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 print(f"\n[Step D] Checking /api/live endpoint vs ground-truth\n")
 try:
-    r = req.get("http://localhost:8000/api/live", timeout=30)
+    r = req.get("http://localhost:8090/api/live", timeout=30)
     r.raise_for_status()
     api = r.json()
 
