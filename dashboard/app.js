@@ -165,7 +165,7 @@ function showMarketClosedScreen(message) {
   if (picksGrid) picksGrid.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 20px;">No stocks listed — Market is closed.</div>';
   
   const tableBody = document.getElementById("live-table-body");
-  if (tableBody) tableBody.innerHTML = '<tr><td colspan="9" class="table-empty">No live stocks listed — Market is closed.</td></tr>';
+  if (tableBody) tableBody.innerHTML = '<tr><td colspan="8" class="table-empty">No live stocks listed — Market is closed.</td></tr>';
   
   // Zero active picks badge
   const badge = document.getElementById("picks-badge");
@@ -386,7 +386,7 @@ function buildStockCard(pick, index) {
     <div class="price-grid">
       <div class="price-item">
         <div class="price-item-label">Entry ~</div>
-        <div class="price-item-value entry">₹${fmt(pick.current_price)}</div>
+        <div class="price-item-value entry" id="cardentry-${pick.symbol.replace(/\W/g,"_")}">₹${fmt(pick.current_price)}</div>
       </div>
       <div class="price-item">
         <div class="price-item-label">Stop Loss</div>
@@ -465,6 +465,10 @@ function updateCardLivePnl() {
     // Live P&L vs entry
     const pnl    = live.live_pnl_pct;
     const pnlRs  = live.live_pnl_rs;
+    const cardEntryEl = document.getElementById(`cardentry-${safe}`);
+    if (cardEntryEl) {
+      cardEntryEl.textContent = `₹${fmt(live.open_price || pick.current_price)}`;
+    }
     if (pnl != null) {
       const cl = pnl > 0 ? "profit" : pnl < 0 ? "loss" : "neutral";
       const sign = pnl > 0 ? "+" : "";
@@ -608,7 +612,7 @@ function renderLiveTable() {
   if (!activePage || !activePage.classList.contains("active")) return;
 
   if (!allPicks.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="table-empty">No picks loaded — run morning scan first</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="table-empty">No picks loaded — run morning scan first</td></tr>`;
     return;
   }
 
@@ -629,7 +633,7 @@ function renderLiveTable() {
       return `<tr>
         <td class="stock-name-cell"><strong>${tvLink}</strong><span>${pick.sector || ""}</span></td>
         <td><span class="action-badge ${ac}">${action}</span></td>
-        <td class="right mono" colspan="7" style="color:var(--text-muted)">Loading...</td>
+        <td class="right mono" colspan="6" style="color:var(--text-muted)">Loading...</td>
       </tr>`;
     }
 
@@ -647,8 +651,7 @@ function renderLiveTable() {
       <td><span class="action-badge ${ac}">${action}</span></td>
       <td class="right mono ${flashCls}">₹${fmt(live.price)}</td>
       <td class="right ${chgCls}">${live.change >= 0 ? "▲ +" : "▼ "}${live.change_pct}%</td>
-      <td class="right mono">₹${fmt(pick.current_price)}</td>
-      <td class="right mono">${live.open_price ? `₹${fmt(live.open_price)}` : "Pending"}</td>
+      <td class="right mono">₹${fmt(live.open_price || pick.current_price)}</td>
       <td class="right ${pnlCls}">${pnlStr}</td>
       <td class="right mono" style="color:var(--text-secondary)">₹${fmt(live.day_high)}</td>
       <td class="right mono" style="color:var(--text-secondary)">₹${fmt(live.day_low)}</td>
@@ -720,7 +723,7 @@ function openModal(index) {
     </div>` : ""}
 
     <div class="modal-prices">
-      <div class="modal-price-box"><div class="modal-price-label">Entry Price</div><div class="modal-price-val">₹${fmt(pick.current_price)}</div></div>
+      <div class="modal-price-box"><div class="modal-price-label">Entry Price</div><div class="modal-price-val">₹${fmt(live.open_price || pick.current_price)}</div></div>
       <div class="modal-price-box"><div class="modal-price-label">Stop Loss</div><div class="modal-price-val" style="color:var(--avoid-color)">₹${fmt(pick.stop_loss)}</div></div>
       <div class="modal-price-box"><div class="modal-price-label">Target 1</div><div class="modal-price-val" style="color:var(--buy-color)">₹${fmt(pick.target_1)}</div></div>
       <div class="modal-price-box"><div class="modal-price-label">Target 2</div><div class="modal-price-val" style="color:var(--buy-color)">₹${fmt(pick.target_2)}</div></div>
