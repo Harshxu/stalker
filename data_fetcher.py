@@ -52,11 +52,12 @@ def get_browser_session():
     if _global_session is None:
         _global_session = requests.Session()
         
-        # Configure retries with exponential backoff on transient errors and rate limits (429)
+        # Configure retries with small backoff on transient server errors only.
+        # Fail fast on 429 to trigger immediate caching cooldown instead of blocking the thread.
         retry_strategy = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            total=3,
+            backoff_factor=0.3,
+            status_forcelist=[500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"]
         )
         

@@ -166,61 +166,68 @@ def verify_picks_prices():
         prev_close = None
         status     = "OK"
 
-        try:
-            ticker = yf.Ticker(symbol)
-
-            # Try fast_info first
+        if data_fetcher.is_rate_limited():
+            status = "COOLDOWN"
+            failed_count += 1
+        else:
             try:
-                fi         = ticker.fast_info
-                live_price = _safe(fi.last_price)
-                prev_close = _safe(fi.previous_close)
-            except Exception:
-                pass
+                ticker = yf.Ticker(symbol, session=data_fetcher.get_browser_session())
 
-            # Fallback: ticker.history
-            if live_price is None:
+                # Try fast_info first
                 try:
-                    df = ticker.history(period="5d")
-                    df.dropna(subset=["Close"], inplace=True)
-                    if not df.empty:
-                        live_price = round(float(df.iloc[-1]["Close"]), 2)
-                        if len(df) >= 2:
-                            prev_close = round(float(df.iloc[-2]["Close"]), 2)
+                    fi         = ticker.fast_info
+                    live_price = _safe(fi.last_price)
+                    prev_close = _safe(fi.previous_close)
                 except Exception:
                     pass
 
-            if live_price is None:
-                status = "FETCH FAIL"
-                failed_count += 1
-            elif scan_price:
-                drift = abs((live_price - scan_price) / scan_price) * 100
-                if drift > TOLERANCE_PCT:
-                    # Price drifted significantly since the 7 AM scan — update it
-                    old_price = scan_price
-                    pick["current_price"] = live_price
-                    if prev_close and live_price:
-                        pick["change_pct"] = round((live_price - prev_close) / prev_close * 100, 2)
-                    # Recalculate stop_loss and targets proportionally if they were set
-                    # (only if targets exist and are based on %%age from entry)
-                    for field in ["stop_loss", "target_1", "target_2"]:
-                        orig = pick.get(field)
-                        if orig and scan_price > 0:
-                            ratio = orig / scan_price
-                            pick[field] = round(live_price * ratio, 2)
-                    status = f"UPDATED ({drift:.1f}%% drift)"
-                    updated_count += 1
-                    logger.info(f"  Price updated for {symbol}: ₹{old_price} → ₹{live_price} (drift={drift:.1f}%%)")
-                else:
-                    status = f"OK ({drift:.2f}%% diff)"
-            else:
-                # No scan price was set — fill it in
-                pick["current_price"] = live_price
-                status = "FILLED IN"
+                # Fallback: ticker.history
+                if live_price is None:
+                    try:
+                        df = ticker.history(period="5d")
+                        df.dropna(subset=["Close"], inplace=True)
+                        if not df.empty:
+                            live_price = round(float(df.iloc[-1]["Close"]), 2)
+                            if len(df) >= 2:
+                                prev_close = round(float(df.iloc[-2]["Close"]), 2)
+                    except Exception:
+                        pass
 
-        except Exception as e:
-            status = f"ERROR"
-            failed_count += 1
-            logger.error(f"  Verification error for {symbol}: {e}")
+                if live_price is None:
+                    status = "FETCH FAIL"
+                    failed_count += 1
+                elif scan_price:
+                    drift = abs((live_price - scan_price) / scan_price) * 100
+                    if drift > TOLERANCE_PCT:
+                        # Price drifted significantly since the 7 AM scan — update it
+                        old_price = scan_price
+                        pick["current_price"] = live_price
+                        if prev_close and live_price:
+                            pick["change_pct"] = round((live_price - prev_close) / prev_close * 100, 2)
+                        # Recalculate stop_loss and targets proportionally if they were set
+                        # (only if targets exist and are based on %%age from entry)
+                        for field in ["stop_loss", "target_1", "target_2"]:
+                            orig = pick.get(field)
+                            if orig and scan_price > 0:
+                                ratio = orig / scan_price
+                                pick[field] = round(live_price * ratio, 2)
+                        status = f"UPDATED ({drift:.1f}%% drift)"
+                        updated_count += 1
+                        logger.info(f"  Price updated for {symbol}: ₹{old_price} → ₹{live_price} (drift={drift:.1f}%%)")
+                    else:
+                        status = f"OK ({drift:.2f}%% diff)"
+                else:
+                    # No scan price was set — fill it in
+                    pick["current_price"] = live_price
+                    status = "FILLED IN"
+
+            except Exception as e:
+                status = f"ERROR"
+                failed_count += 1
+                err_msg = str(e)
+                if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
+                    data_fetcher.mark_rate_limited()
+                logger.error(f"  Verification error for {symbol}: {e}")
 
         name_short = pick.get("name", symbol)[:18]
         sp_str = f"₹{scan_price:>9.2f}" if scan_price else "          N/A"

@@ -20,7 +20,7 @@ import time
 import threading
 import logging
 from datetime import datetime, date
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
 from typing import Dict, List, Optional
 
@@ -832,7 +832,7 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
     print(f"  Picks API:  http://localhost:{port}/api/picks")
     print(f"  Press Ctrl+C to stop\n")
 
-    server = HTTPServer(("", port), StalkerHandler)
+    server = ThreadingHTTPServer(("", port), StalkerHandler)
     server.serve_forever()
 
 
