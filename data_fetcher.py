@@ -42,15 +42,17 @@ def _silence_stderr_stdout():
 # Global requests session to enable connection pooling & persistent cookies
 _global_session = None
 
-# Rate limiting protection state (cooldown of 30 minutes)
+# Rate limiting protection state (cooldown of 5 minutes, resets per attempt)
 _rate_limit_cooldown_until = 0.0
-COOLDOWN_DURATION_SEC = 30 * 60
+COOLDOWN_DURATION_SEC = 5 * 60
 
 def mark_rate_limited():
     """Mark that we are rate limited and start cooldown."""
     global _rate_limit_cooldown_until
-    _rate_limit_cooldown_until = time.time() + COOLDOWN_DURATION_SEC
-    logger.warning(f"Yahoo Finance rate limit hit! Pausing all yfinance network calls for {COOLDOWN_DURATION_SEC // 60} minutes.")
+    # Only extend cooldown if not already in cooldown (avoid resetting timer on every 429)
+    if _rate_limit_cooldown_until <= time.time():
+        _rate_limit_cooldown_until = time.time() + COOLDOWN_DURATION_SEC
+        logger.warning(f"Yahoo Finance rate limit hit! Pausing all yfinance network calls for {COOLDOWN_DURATION_SEC // 60} minutes.")
 
 def is_rate_limited() -> bool:
     """Check if we are currently in rate-limiting cooldown."""

@@ -132,8 +132,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
         with _silence_stderr_stdout():
             daily_bulk = yf.download(
                 symbols, period="5d", interval="1d",
-                group_by="ticker", threads=True, progress=False,
-                session=get_browser_session(),
+                group_by="ticker", threads=False, progress=False,
             )
         for sym in symbols:
             try:
@@ -164,8 +163,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                 with _silence_stderr_stdout():
                     intraday_bulk = yf.download(
                         symbols, period="1d", interval="1m",
-                        group_by="ticker", threads=True, progress=False,
-                        session=get_browser_session(),
+                        group_by="ticker", threads=False, progress=False,
                     )
                 for sym in symbols:
                     try:
@@ -247,7 +245,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                 if is_rate_limited():
                     break
                 try:
-                    ticker    = yf.Ticker(symbol, session=get_browser_session())
+                    ticker    = yf.Ticker(symbol)
                     last_price = None
                     prev_close = None
                     day_high   = None
@@ -321,11 +319,15 @@ def _refresh_cache():
             is_closed = is_nse_holiday(now_ist.date())
             
             current_mins = now_ist.hour * 60 + now_ist.minute
-            is_outside_hours = (current_mins < 9*60+15 or current_mins > 16*60) # before 9:15 AM or after 4:00 PM IST
+            is_outside_hours = (current_mins < 9*60+15 or current_mins > 16*60)
             
             if is_closed or is_outside_hours:
-                # Polling paused. Check again in 30 seconds.
                 time.sleep(30)
+                continue
+
+            if is_rate_limited():
+                logger.debug("[cache] Rate-limited — skipping fetch, keeping existing cache")
+                time.sleep(CACHE_TTL)
                 continue
 
             with _cache_lock:
@@ -337,9 +339,9 @@ def _refresh_cache():
                     if fresh:
                         _price_cache = fresh
                         _cache_time  = time.time()
-                        logger.debug(f"Live price cache refreshed for {len(fresh)} symbols")
+                        logger.debug(f"[cache] Refreshed {len(fresh)} symbols")
                     else:
-                        logger.warning("Live price background refresh returned no data. Keeping stale cache.")
+                        logger.warning("[cache] Fetch returned no data — keeping stale cache (will retry)")
 
         except Exception as e:
             logger.error(f"Cache refresh error: {e}")
