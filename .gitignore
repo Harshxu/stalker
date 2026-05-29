@@ -76,3 +76,6 @@ eod_reports_history.json
 *.njsproj
 *.sln
 *.sw?
+
+# Environment Secrets
+.env
