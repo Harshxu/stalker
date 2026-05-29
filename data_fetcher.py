@@ -14,12 +14,22 @@ import logging
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 import config
+import contextlib
+import io
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+
+@contextlib.contextmanager
+def _silence_stderr_stdout():
+    """A context manager that redirects stdout and stderr to devnull to suppress raw print noise."""
+    with open(os.devnull, 'w') as devnull:
+        with contextlib.redirect_stdout(devnull):
+            with contextlib.redirect_stderr(devnull):
+                yield
 
 # Global requests session to enable connection pooling & persistent cookies
 _global_session = None
@@ -61,6 +71,15 @@ class YFRateLimitFilter(logging.Filter):
 # Register the filter with yfinance's internal logger and the root logger
 logging.getLogger("yfinance").addFilter(YFRateLimitFilter())
 logging.getLogger().addFilter(YFRateLimitFilter())
+
+# Double-layered defense: monkeypatch yfinance's module-level print functions to prevent raw error logs on standard output/error
+try:
+    import yfinance.multi as _yfm
+    import yfinance.base as _yfb
+    _yfm.print = lambda *args, **kwargs: None
+    _yfb.print = lambda *args, **kwargs: None
+except Exception as _patch_err:
+    logger.debug(f"Failed to monkeypatch yfinance print functions: {_patch_err}")
 
 
 
@@ -191,7 +210,8 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
             break
         try:
             logger.info(f"  Downloading batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} symbols)...")
-            data = yf.download(chunk, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
+            with _silence_stderr_stdout():
+                data = yf.download(chunk, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
 
             chunk_total = len(chunk)
             for symbol in chunk:
@@ -464,7 +484,8 @@ def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dic
     try:
         session = get_browser_session()
         # Fetch 1d data for all symbols
-        df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        with _silence_stderr_stdout():
+            df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
         
         if df.empty:
             logger.warning("Bulk download returned empty DataFrame.")
@@ -558,7 +579,8 @@ def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Di
     
     try:
         session = get_browser_session()
-        df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        with _silence_stderr_stdout():
+            df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
         
         if df.empty:
             logger.warning("Bulk download returned empty DataFrame.")

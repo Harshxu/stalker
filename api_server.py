@@ -19,6 +19,7 @@ import sys
 import time
 import threading
 import logging
+import contextlib
 from datetime import datetime, date
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse
@@ -102,6 +103,14 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
         logger.debug("Skipping live price fetch due to active rate-limit cooldown.")
         return {}
 
+    @contextlib.contextmanager
+    def _silence_stderr_stdout():
+        """A context manager that redirects stdout and stderr to devnull to suppress raw print noise."""
+        with open(os.devnull, 'w') as devnull:
+            with contextlib.redirect_stdout(devnull):
+                with contextlib.redirect_stderr(devnull):
+                    yield
+
     # Determine if NSE market is currently open (IST)
     from datetime import timezone, timedelta
     IST_OFFSET = timedelta(hours=5, minutes=30)
@@ -120,11 +129,12 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     prev_closes: dict = {}
     last_closes: dict = {}
     try:
-        daily_bulk = yf.download(
-            symbols, period="5d", interval="1d",
-            group_by="ticker", threads=True, progress=False,
-            session=get_browser_session(),
-        )
+        with _silence_stderr_stdout():
+            daily_bulk = yf.download(
+                symbols, period="5d", interval="1d",
+                group_by="ticker", threads=True, progress=False,
+                session=get_browser_session(),
+            )
         for sym in symbols:
             try:
                 df_d = daily_bulk[sym].copy() if total > 1 else daily_bulk
@@ -151,11 +161,12 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
             logger.debug("Skipping open market intraday download due to rate limit cooldown.")
         else:
             try:
-                intraday_bulk = yf.download(
-                    symbols, period="1d", interval="1m",
-                    group_by="ticker", threads=True, progress=False,
-                    session=get_browser_session(),
-                )
+                with _silence_stderr_stdout():
+                    intraday_bulk = yf.download(
+                        symbols, period="1d", interval="1m",
+                        group_by="ticker", threads=True, progress=False,
+                        session=get_browser_session(),
+                    )
                 for sym in symbols:
                     try:
                         df_m = intraday_bulk[sym].copy() if total > 1 else intraday_bulk
@@ -181,6 +192,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     for symbol in symbols:
         try:
             prev_close = prev_closes.get(symbol)
+            prev_cached = _price_cache.get(symbol, {}) if isinstance(_price_cache, dict) else {}
 
             if is_market_open:
                 iv = intraday.get(symbol)
@@ -191,8 +203,8 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                     volume     = iv["volume"]
                 elif symbol in last_closes:
                     last_price = last_closes[symbol]
-                    day_high   = None
-                    day_low    = None
+                    day_high   = prev_cached.get("day_high")
+                    day_low    = prev_cached.get("day_low")
                     volume     = None
                 else:
                     continue
@@ -200,8 +212,8 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                 if symbol not in last_closes:
                     continue
                 last_price = last_closes[symbol]
-                day_high   = None
-                day_low    = None
+                day_high   = prev_cached.get("day_high")
+                day_low    = prev_cached.get("day_low")
                 volume     = None
 
             change     = round(last_price - prev_close, 2) if prev_close else 0.0
@@ -268,6 +280,7 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
 
                     change     = round(last_price - prev_close, 2) if prev_close else 0.0
                     change_pct = round((change / prev_close) * 100, 2) if prev_close else 0.0
+                    prev_cached = _price_cache.get(symbol, {}) if isinstance(_price_cache, dict) else {}
                     results[symbol] = {
                         "symbol":     symbol,
                         "name":       symbol.replace(".NS", "").replace(".BO", ""),
@@ -275,8 +288,8 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                         "prev_close": prev_close,
                         "change":     change,
                         "change_pct": change_pct,
-                        "day_high":   day_high,
-                        "day_low":    day_low,
+                        "day_high":   day_high if day_high is not None else prev_cached.get("day_high"),
+                        "day_low":    day_low if day_low is not None else prev_cached.get("day_low"),
                         "volume":     None,
                         "direction":  "up" if change >= 0 else "down",
                         "fetched_at": datetime.now().isoformat(),
@@ -287,8 +300,6 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
                     if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(fe).__name__.lower():
                         mark_rate_limited()
                     logger.error(f"Serial fallback failed for {symbol}: {fe}")
-
-    return results
 
     return results
 
@@ -478,14 +489,57 @@ def api_live_prices() -> Dict:
             except Exception:
                 close_prices = {}
 
+    # Fetch picks data to get current/entry price from the scan as ultimate fallback
+    picks_list = []
+    try:
+        picks_data = db_manager.get_today_picks()
+        if not picks_data:
+            scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+            if os.path.exists(scan_path):
+                with open(scan_path) as f:
+                    picks_data = json.load(f)
+        if picks_data:
+            picks_list = picks_data.get("picks", [])
+    except Exception as pe:
+        logger.debug(f"Could not load today's picks for fallback prices: {pe}")
+
+    # Combine keys from both prices cache and _tracked_symbols to prevent dashboard Loading... state
+    all_keys = set(prices.keys()) | set(_tracked_symbols)
+
     # Enrich with P&L from morning entry and EOD close price
     enriched = {}
-    for symbol, data in prices.items():
+    for symbol in all_keys:
+        data = prices.get(symbol)
+        
         entry = open_prices.get(symbol, {})
         open_price = entry.get("open") or entry.get("current_price")
 
         close_entry = close_prices.get(symbol, {})
         close_price = close_entry.get("close") or close_entry.get("current_price")
+
+        if not data:
+            # Missing from active yfinance cache, construct a safe fallback record
+            pick_price = None
+            for p in picks_list:
+                if p.get("symbol") == symbol:
+                    pick_price = p.get("current_price")
+                    break
+            
+            ref_price = open_price or pick_price or 0.0
+            
+            data = {
+                "symbol":     symbol,
+                "name":       symbol.replace(".NS", "").replace(".BO", ""),
+                "price":      round(ref_price, 2),
+                "prev_close": round(open_price, 2) if open_price else None,
+                "change":     0.0,
+                "change_pct": 0.0,
+                "day_high":   round(ref_price, 2) if ref_price > 0 else None,
+                "day_low":    round(ref_price, 2) if ref_price > 0 else None,
+                "volume":     None,
+                "direction":  "neutral",
+                "fetched_at": datetime.now().isoformat(),
+            }
 
         live_pnl_pct = None
         live_pnl_rs  = None
