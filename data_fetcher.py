@@ -46,6 +46,20 @@ def is_rate_limited() -> bool:
             _rate_limit_cooldown_until = 0.0
     return False
 
+# Custom log filter to catch internal yfinance rate limit logging and trigger cooldown.
+# This ensures that even when yfinance handles 429 errors internally without raising
+# exceptions to our code, we still transition to the grace cooldown state instantly.
+class YFRateLimitFilter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if "yfratelimiterror" in msg.lower() or "too many requests" in msg.lower() or "rate limited" in msg.lower():
+            mark_rate_limited()
+        return True
+
+# Register the filter with yfinance's internal logger
+logging.getLogger("yfinance").addFilter(YFRateLimitFilter())
+
+
 def get_browser_session():
     """Get or create a reusable requests session with browser headers, connection pooling, and automatic retries."""
     global _global_session
