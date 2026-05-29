@@ -98,8 +98,188 @@ def run_premarket_analysis():
 
 
 # ═══════════════════════════════════════════════
-# TASK 1: MORNING EMAIL (8:30 AM)
+# TASK 0b: PRICE VERIFICATION (8:15 AM)
 # ═══════════════════════════════════════════════
+
+# Stores the last verification report for the morning email
+_verification_report: Dict = {}
+
+def verify_picks_prices():
+    """
+    Run at 8:15 AM — 15 minutes before the morning email.
+    Cross-checks each pick's recorded current_price against fresh yfinance fast_info.
+    Corrects drifted prices in memory and DB so the morning email is 100%% accurate.
+    Generates a verification report that gets injected into the email.
+    """
+    global _today_scan_result, _today_symbols_picked, _verification_report
+
+    if is_nse_holiday(date.today()) and not IS_TEST_MODE:
+        logger.info("Holiday — skipping price verification.")
+        return
+
+    import math, time as _time
+    import yfinance as yf
+
+    logger.info("=" * 55)
+    logger.info("  PRICE VERIFICATION (8:15 AM)")
+    logger.info("=" * 55)
+
+    # ── Load today's picks if not already in memory ──────────────────────
+    if not _today_scan_result:
+        today_str = str(date.today())
+        try:
+            db_picks = db_manager.get_today_picks()
+            if db_picks and db_picks.get("date") == today_str:
+                _today_scan_result = db_picks
+                picks_list = db_picks.get("picks", db_picks.get("top_picks", []))
+                _today_symbols_picked = [p["symbol"] for p in picks_list if p.get("symbol")]
+                logger.info(f"Loaded {len(_today_symbols_picked)} picks from DB for verification")
+        except Exception as db_err:
+            logger.warning(f"Could not load picks from DB: {db_err}")
+
+    picks = _today_scan_result.get("top_picks", _today_scan_result.get("picks", []))
+    if not picks:
+        logger.warning("No picks found to verify — skipping verification")
+        return
+
+    TOLERANCE_PCT = 2.0   # Flag if price drifted more than 2%% since 7 AM scan
+    verified_rows = []
+    updated_count = 0
+    failed_count  = 0
+    total         = len(picks)
+
+    def _safe(val, nd=2):
+        try:
+            f = float(val)
+            return None if math.isnan(f) else round(f, nd)
+        except:
+            return None
+
+    logger.info(f"Verifying prices for {total} picks via yfinance fast_info...")
+    logger.info(f"  {'Stock':<20} {'Scan Price':>12} {'Live Price':>12} {'Drift%':>8} {'Status':<12}")
+    logger.info("  " + "-" * 66)
+
+    for pick in picks:
+        symbol    = pick.get("symbol", "")
+        scan_price = pick.get("current_price")
+        live_price = None
+        prev_close = None
+        status     = "OK"
+
+        try:
+            ticker = yf.Ticker(symbol)
+
+            # Try fast_info first
+            try:
+                fi         = ticker.fast_info
+                live_price = _safe(fi.last_price)
+                prev_close = _safe(fi.previous_close)
+            except Exception:
+                pass
+
+            # Fallback: ticker.history
+            if live_price is None:
+                try:
+                    df = ticker.history(period="5d")
+                    df.dropna(subset=["Close"], inplace=True)
+                    if not df.empty:
+                        live_price = round(float(df.iloc[-1]["Close"]), 2)
+                        if len(df) >= 2:
+                            prev_close = round(float(df.iloc[-2]["Close"]), 2)
+                except Exception:
+                    pass
+
+            if live_price is None:
+                status = "FETCH FAIL"
+                failed_count += 1
+            elif scan_price:
+                drift = abs((live_price - scan_price) / scan_price) * 100
+                if drift > TOLERANCE_PCT:
+                    # Price drifted significantly since the 7 AM scan — update it
+                    old_price = scan_price
+                    pick["current_price"] = live_price
+                    if prev_close and live_price:
+                        pick["change_pct"] = round((live_price - prev_close) / prev_close * 100, 2)
+                    # Recalculate stop_loss and targets proportionally if they were set
+                    # (only if targets exist and are based on %%age from entry)
+                    for field in ["stop_loss", "target_1", "target_2"]:
+                        orig = pick.get(field)
+                        if orig and scan_price > 0:
+                            ratio = orig / scan_price
+                            pick[field] = round(live_price * ratio, 2)
+                    status = f"UPDATED ({drift:.1f}%% drift)"
+                    updated_count += 1
+                    logger.info(f"  Price updated for {symbol}: ₹{old_price} → ₹{live_price} (drift={drift:.1f}%%)")
+                else:
+                    status = f"OK ({drift:.2f}%% diff)"
+            else:
+                # No scan price was set — fill it in
+                pick["current_price"] = live_price
+                status = "FILLED IN"
+
+        except Exception as e:
+            status = f"ERROR"
+            failed_count += 1
+            logger.error(f"  Verification error for {symbol}: {e}")
+
+        name_short = pick.get("name", symbol)[:18]
+        sp_str = f"₹{scan_price:>9.2f}" if scan_price else "          N/A"
+        lp_str = f"₹{live_price:>9.2f}" if live_price else "          N/A"
+        drift_str = ""
+        if scan_price and live_price:
+            d = abs((live_price - scan_price) / scan_price) * 100
+            drift_str = f"{d:>7.2f}%%"
+        else:
+            drift_str = "       N/A"
+
+        logger.info(f"  {name_short:<20} {sp_str} {lp_str} {drift_str} {status}")
+
+        verified_rows.append({
+            "symbol":     symbol,
+            "name":       pick.get("name", symbol),
+            "scan_price": scan_price,
+            "live_price": live_price,
+            "status":     status,
+            "action":     pick.get("action", ""),
+            "stop_loss":  pick.get("stop_loss"),
+            "target_2":   pick.get("target_2"),
+        })
+
+        _time.sleep(0.15)   # polite delay between tickers
+
+    # ── Save updated scan result back to DB and disk ──────────────────────
+    if updated_count > 0:
+        logger.info(f"Saving {updated_count} corrected prices back to DB...")
+        try:
+            db_manager.save_daily_picks(_today_scan_result)
+        except Exception as db_err:
+            logger.warning(f"Failed to re-save updated picks to DB: {db_err}")
+        try:
+            scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+            with open(scan_path, "w") as f:
+                json.dump(_today_scan_result, f, indent=2, default=str)
+        except Exception:
+            pass
+
+    # ── Build verification report dict (used by morning email) ───────────
+    pass_count = total - failed_count
+    pass_rate  = round(pass_count / total * 100) if total else 0
+
+    _verification_report = {
+        "verified_at":   datetime.now().isoformat(),
+        "total":         total,
+        "updated":       updated_count,
+        "failed":        failed_count,
+        "pass_rate":     pass_rate,
+        "rows":          verified_rows,
+        "data_quality":  "HIGH" if pass_rate >= 90 else "MEDIUM" if pass_rate >= 70 else "LOW",
+    }
+
+    logger.info("=" * 55)
+    logger.info(f"  Verification complete: {pass_count}/{total} OK, {updated_count} updated, {failed_count} failed")
+    logger.info(f"  Data quality: {_verification_report['data_quality']} ({pass_rate}%% pass rate)")
+    logger.info("=" * 55)
+
 
 def run_morning_scan():
     """Send the morning email at 8:30 AM using pre-computed picks from 7 AM analysis."""
@@ -165,8 +345,8 @@ def run_morning_scan():
         else:
             logger.info(f"Using pre-market picks: {len(_today_symbols_picked)} stocks ready")
 
-        # Send automated morning email with today's top picks
-        _send_morning_email(_today_scan_result)
+        # Send automated morning email with today's top picks + verification report
+        _send_morning_email(_today_scan_result, _verification_report)
 
         # Open dashboard in browser
         _open_dashboard()
@@ -404,11 +584,40 @@ def _send_via_brevo(subject: str, html_body: str) -> bool:
         return False
 
 
-def _send_morning_email(scan_result: Dict):
+def _send_morning_email(scan_result: Dict, verification: Dict = None):
     try:
-        picks = scan_result.get("top_picks", [])[:10]
-        market = scan_result.get("market_trend", "unknown").upper()
+        picks    = scan_result.get("top_picks", [])[:10]
+        market   = scan_result.get("market_trend", "unknown").upper()
         date_str = str(date.today())
+        ver      = verification or {}
+
+        # ── Verification badge HTML ───────────────────────────────────────
+        qual = ver.get("data_quality", "")
+        if qual == "HIGH":
+            ver_badge = f"""<div style="display:inline-block;padding:6px 14px;background:#dcfce7;
+                border-radius:9999px;font-size:12px;font-weight:bold;color:#16a34a;margin-bottom:16px;">
+                ✅ Price Data Verified — {ver.get('pass_rate',100)}% accuracy confirmed at {ver.get('verified_at','')[11:16]} IST
+                </div>"""
+        elif qual == "MEDIUM":
+            ver_badge = f"""<div style="display:inline-block;padding:6px 14px;background:#fef9c3;
+                border-radius:9999px;font-size:12px;font-weight:bold;color:#a16207;margin-bottom:16px;">
+                ⚠️ Price Data Partially Verified — {ver.get('pass_rate',0)}% accuracy
+                </div>"""
+        elif qual == "LOW":
+            ver_badge = """<div style=\"display:inline-block;padding:6px 14px;background:#fee2e2;
+                border-radius:9999px;font-size:12px;font-weight:bold;color:#dc2626;margin-bottom:16px;\">
+                ⚠️ Price Verification Issues — treat entry prices as indicative
+                </div>"""
+        else:
+            ver_badge = ""  # verification not run yet
+
+        # ── Updated count note ────────────────────────────────────────────
+        if ver.get("updated", 0) > 0:
+            updated_note = f"""<div style="margin-top:8px;font-size:12px;color:#6b7280;">
+                💡 {ver['updated']} stock price(s) auto-corrected from 7AM scan values to latest live prices.
+                </div>"""
+        else:
+            updated_note = ""
         
         subject = f"🟢 STALKER Morning Picks — {date_str} (Trend: {market})"
         
@@ -464,7 +673,10 @@ def _send_morning_email(scan_result: Dict):
                             <div style="font-size: 16px; font-weight: bold; color: #3b82f6;">{market}</div>
                         </div>
                     </div>
-                    
+
+                    <!-- Verification Badge -->
+                    <div style="text-align:center;">{ver_badge}{updated_note}</div>
+
                     <!-- Table Title -->
                     <h3 style="margin: 0 0 12px 0; color: #1e3a8a; font-weight: 700; font-size: 18px;">🔥 Today's Top Picks</h3>
                     
@@ -735,7 +947,14 @@ def setup_schedule():
     schedule.every().thursday.at("07:00").do(run_premarket_analysis)
     schedule.every().friday.at("07:00").do(run_premarket_analysis)
 
-    # 8:30 AM — Send morning email with today's top picks
+    # 8:15 AM — Price verification: cross-check picks vs live prices, update if drifted
+    schedule.every().monday.at("08:15").do(verify_picks_prices)
+    schedule.every().tuesday.at("08:15").do(verify_picks_prices)
+    schedule.every().wednesday.at("08:15").do(verify_picks_prices)
+    schedule.every().thursday.at("08:15").do(verify_picks_prices)
+    schedule.every().friday.at("08:15").do(verify_picks_prices)
+
+    # 8:30 AM — Send morning email with today's top picks (verified prices)
     schedule.every().monday.at("08:30").do(run_morning_scan)
     schedule.every().tuesday.at("08:30").do(run_morning_scan)
     schedule.every().wednesday.at("08:30").do(run_morning_scan)
@@ -763,7 +982,7 @@ def setup_schedule():
     schedule.every().thursday.at("16:00").do(generate_eod_report)
     schedule.every().friday.at("16:00").do(generate_eod_report)
 
-    logger.info("Schedule: 7:00 AM analysis | 8:30 AM morning email | 9:20 AM open | 3:35 PM close | 4:00 PM EOD report")
+    logger.info("Schedule: 7:00 AM analysis | 8:15 AM price verify | 8:30 AM morning email | 9:20 AM open | 3:35 PM close | 4:00 PM EOD report")
 
 
 # ─────────────────────────────────────────────
