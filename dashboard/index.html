@@ -4,54 +4,38 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>STALKER — Live Stock Analyzer</title>
-  <meta name="description"
-    content="Live NSE India stock picks with real-time price updates, P&L tracking, and AI-powered signals." />
+  <title>STALKER — Stock Picks</title>
+  <meta name="description" content="Daily NSE stock picks with AI-powered signals. Know what to buy, what to watch, what to avoid." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
-    rel="stylesheet" />
-  <link rel="stylesheet" href="style.css?v=4" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css?v=5" />
 </head>
 
 <body>
 
-  <!-- ══ WELCOME SPLASH SCREEN ══════════════════ -->
+  <!-- ══ WELCOME SPLASH ══════════════════════════ -->
   <div id="welcome-screen" class="welcome-screen">
     <div class="welcome-card">
       <div class="welcome-logo">🚀</div>
       <h2 class="welcome-brand">
-        <span class="letter">S</span>
-        <span class="letter">T</span>
-        <span class="letter">A</span>
-        <span class="letter">L</span>
-        <span class="letter">K</span>
-        <span class="letter">E</span>
-        <span class="letter">R</span>
+        <span class="letter">S</span><span class="letter">T</span><span class="letter">A</span>
+        <span class="letter">L</span><span class="letter">K</span><span class="letter">E</span><span class="letter">R</span>
       </h2>
       <div class="welcome-divider"></div>
       <p class="welcome-quote">"Master your time, conquer your goals"</p>
     </div>
   </div>
 
-  <!-- ══ LIVE TICKER BAR (top) ══════════════════ -->
-  <div class="ticker-wrap" id="ticker-wrap">
-    <div class="ticker-label">LIVE</div>
-    <div class="ticker-track" id="ticker-track">
-      <div class="ticker-inner" id="ticker-inner">
-        <span class="ticker-loading">Fetching live prices...</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ══ SIDEBAR ════════════════════════════════ -->
+  <!-- ══ LAYOUT ════════════════════════════════════ -->
   <div class="layout">
+
+    <!-- SIDEBAR -->
     <nav class="sidebar" id="sidebar">
       <div class="sidebar-logo">
         <div class="logo-icon">📈</div>
         <div class="logo-text">
           <span class="logo-main">STALKER</span>
-          <span class="logo-sub">Live Market Intelligence</span>
+          <span class="logo-sub">Market Intelligence</span>
         </div>
       </div>
 
@@ -60,16 +44,10 @@
         <span class="nav-icon">🎯</span><span>Today's Picks</span>
         <span class="nav-badge" id="picks-badge">0</span>
       </a>
-      <a href="#" class="nav-link" data-page="live" id="nav-live">
-        <span class="nav-icon">⚡</span><span>Live Prices</span>
-        <span class="live-dot"></span>
-      </a>
-
       <a href="#" class="nav-link" data-page="automations" id="nav-automations">
         <span class="nav-icon">⏰</span><span>Automations</span>
         <span class="auto-dot" id="auto-dot"></span>
       </a>
-
       <a href="#" class="nav-link" data-page="howto" id="nav-howto">
         <span class="nav-icon">💡</span><span>How to Use</span>
       </a>
@@ -80,11 +58,10 @@
           <span id="market-status-text">Checking...</span>
         </div>
         <div class="last-updated" id="last-updated-text">—</div>
-        <div class="refresh-countdown" id="refresh-countdown"></div>
       </div>
     </nav>
 
-    <!-- ══ MAIN CONTENT ════════════════════════════ -->
+    <!-- MAIN CONTENT -->
     <main class="main-content" id="main-content">
 
       <!-- ── TODAY'S PICKS ── -->
@@ -121,8 +98,8 @@
             <div class="mc-value" id="picks-count-val">—</div>
           </div>
           <div class="market-card">
-            <div class="mc-label">Live P&L (Avg)</div>
-            <div class="mc-value mono" id="avg-live-pnl">—</div>
+            <div class="mc-label">Scan Time</div>
+            <div class="mc-value" id="scan-time-val" style="font-size:13px">—</div>
           </div>
         </div>
 
@@ -134,12 +111,7 @@
           <div class="sector-loading">Loading...</div>
         </div>
 
-        <!-- Loss Alert -->
-        <div class="alert-banner danger hidden" id="loss-alert">
-          ⚠️ <strong>Stop Trading Today</strong> — Daily loss limit reached. Protect your capital.
-        </div>
-
-        <!-- Picks Grid -->
+        <!-- Picks List -->
         <div class="section-header">
           <h2 class="section-title">Top Picks <span class="title-badge" id="picks-total-badge">0</span></h2>
           <div class="filter-tabs">
@@ -148,47 +120,13 @@
             <button class="filter-tab" onclick="filterPicks('WATCH',this)">🟡 Watch</button>
           </div>
         </div>
-        <div class="picks-grid" id="picks-grid">
+        <div class="picks-list" id="picks-list">
           <div class="loading-spinner">
             <div class="spinner"></div>
             <p>Analysing markets...</p>
           </div>
         </div>
       </div>
-
-      <!-- ── LIVE PRICES PAGE ── -->
-      <div class="page hidden" id="page-live">
-        <div class="page-header">
-          <div>
-            <h1 class="page-title">Live Prices <span class="live-badge-title">LIVE</span></h1>
-            <p class="page-subtitle" id="live-updated-at">Updating every 20 seconds</p>
-          </div>
-        </div>
-        <div class="live-table-wrap">
-          <table class="live-table" id="live-table">
-            <thead>
-              <tr>
-                <th>Stock</th>
-                <th>Signal</th>
-                <th class="right">Morning Open</th>
-                <th class="right">Live Price</th>
-                <th class="right">Change</th>
-                <th class="right">Entry Price</th>
-                <th class="right">Live P&L</th>
-                <th class="right">Day High</th>
-                <th class="right">Day Low</th>
-              </tr>
-            </thead>
-            <tbody id="live-table-body">
-              <tr>
-                <td colspan="9" class="table-empty">Waiting for live data...</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-
 
       <!-- ── HOW TO USE ── -->
       <div class="page hidden" id="page-howto">
@@ -210,10 +148,9 @@
             <p>Only consider BUY signals. Yellow WATCH means wait. Red AVOID means skip.</p>
           </div>
           <div class="howto-card">
-            <div class="howto-step">3</div><span class="howto-icon">⚡</span>
-            <h3>Watch the Live Price</h3>
-            <p>The Live Prices tab shows real-time updates every 20 seconds. The P&L shows your profit/loss from the
-              morning entry.</p>
+            <div class="howto-step">3</div><span class="howto-icon">📊</span>
+            <h3>Click stock name → TradingView</h3>
+            <p>Click any stock name to open it directly on TradingView/NSE. See live chart and current price.</p>
           </div>
           <div class="howto-card">
             <div class="howto-step">4</div><span class="howto-icon">📌</span>
@@ -228,30 +165,23 @@
           <div class="howto-card">
             <div class="howto-step">6</div><span class="howto-icon">⛔</span>
             <h3>Stop After 2 Losses</h3>
-            <p>2 losing trades in one day? Stop. The system shows a warning. Protect your capital.</p>
+            <p>2 losing trades in one day? Stop. Protect your capital.</p>
           </div>
         </div>
         <div class="signal-legend">
           <h3>Understanding Signals</h3>
           <div class="legend-grid">
-            <div class="legend-item"><span class="action-badge green">BUY</span><span>Strong setup — all conditions
-                met.</span></div>
-            <div class="legend-item"><span class="action-badge yellow">WATCH</span><span>Good stock but setup not ideal
-                today.</span></div>
-            <div class="legend-item"><span class="action-badge red">AVOID</span><span>Conditions not right. Do not
-                trade.</span></div>
-            <div class="legend-item"><span class="risk-label low">Low Risk</span><span>Strong trend + confirmed
-                volume.</span></div>
-            <div class="legend-item"><span class="risk-label med">Medium Risk</span><span>Good setup, one condition
-                missing.</span></div>
-            <div class="legend-item"><span class="risk-label high">High Risk</span><span>Speculative — experienced
-                traders only.</span></div>
+            <div class="legend-item"><span class="action-badge green">BUY</span><span>Strong setup — all conditions met.</span></div>
+            <div class="legend-item"><span class="action-badge yellow">WATCH</span><span>Good stock but setup not ideal today.</span></div>
+            <div class="legend-item"><span class="action-badge red">AVOID</span><span>Conditions not right. Do not trade.</span></div>
+            <div class="legend-item"><span class="risk-label low">Low Risk</span><span>Strong trend + confirmed volume.</span></div>
+            <div class="legend-item"><span class="risk-label med">Medium Risk</span><span>Good setup, one condition missing.</span></div>
+            <div class="legend-item"><span class="risk-label high">High Risk</span><span>Speculative — experienced traders only.</span></div>
           </div>
         </div>
       </div>
 
-
-      <!-- ── AUTOMATIONS PAGE ── -->
+      <!-- ── AUTOMATIONS ── -->
       <div class="page hidden" id="page-automations">
         <div class="page-header">
           <div>
@@ -274,14 +204,6 @@
       </div>
 
     </main>
-  </div><!-- /layout -->
-
-  <!-- ══ STOCK DETAIL MODAL ══════════════════════ -->
-  <div class="modal-overlay hidden" id="modal-overlay" onclick="closeModal()">
-    <div class="modal" onclick="event.stopPropagation()">
-      <button class="modal-close" onclick="closeModal()">✕</button>
-      <div id="modal-content"></div>
-    </div>
   </div>
 
   <!-- ══ NO DATA OVERLAY ════════════════════════ -->
@@ -290,27 +212,16 @@
       <div class="no-data-icon spinner-sun">🌅</div>
       <h2 style="font-size: 22px; font-weight: 800; margin-bottom: 10px;">Auto-Generating Today's Picks</h2>
       <p style="max-width: 420px; margin: 10px auto; line-height: 1.6; color: var(--text-secondary); font-size: 14px;">
-        STALKER is running a pre-market 6-layer AI screening analysis across high-liquidity NSE stocks to identify
-        today's high-probability opportunities.
+        STALKER is running a pre-market 6-layer AI screening analysis across high-liquidity NSE stocks.
       </p>
-      <div
-        style="margin: 24px auto; width: 80%; background: var(--bg-elevated); height: 6px; border-radius: 3px; overflow: hidden; border: 1px solid var(--border);">
-        <div class="animated-loading-bar"
-          style="background: var(--buy-color); height: 100%; width: 50%; border-radius: 3px;"></div>
+      <div style="margin: 24px auto; width: 80%; background: var(--bg-elevated); height: 6px; border-radius: 3px; overflow: hidden;">
+        <div class="animated-loading-bar" style="background: var(--buy-color); height: 100%; width: 50%; border-radius: 3px;"></div>
       </div>
-      <div class="no-data-steps"
-        style="border-top: 1px solid var(--border); padding-top: 15px; text-align: center; display: block;">
-        <span
-          style="font-size: 13px; color: var(--buy-color); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; display: block;">
-          ⏳ Scan in progress...
-        </span>
-        <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">This takes about 45 seconds. Page will
-          update automatically.</p>
-      </div>
+      <span style="font-size: 13px; color: var(--buy-color); font-weight: 700; text-transform: uppercase; letter-spacing: 1px; display: block;">⏳ Scan in progress...</span>
+      <p style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">This takes about 45 seconds. Page will update automatically.</p>
     </div>
   </div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
-
 </html>
