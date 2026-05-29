@@ -323,9 +323,12 @@ def _refresh_cache():
             if symbols:
                 fresh = _fetch_live_prices(symbols)
                 with _cache_lock:
-                    _price_cache = fresh
-                    _cache_time  = time.time()
-                logger.debug(f"Live price cache refreshed for {len(fresh)} symbols")
+                    if fresh:
+                        _price_cache = fresh
+                        _cache_time  = time.time()
+                        logger.debug(f"Live price cache refreshed for {len(fresh)} symbols")
+                    else:
+                        logger.warning("Live price background refresh returned no data. Keeping stale cache.")
 
         except Exception as e:
             logger.error(f"Cache refresh error: {e}")
@@ -339,7 +342,7 @@ def get_cached_prices() -> Dict:
 
     with _cache_lock:
         age = time.time() - _cache_time
-        if age < CACHE_TTL * 2 and _price_cache:
+        if (age < CACHE_TTL * 2 and _price_cache) or is_rate_limited():
             return dict(_price_cache)
         symbols = list(_tracked_symbols)
 
@@ -347,9 +350,10 @@ def get_cached_prices() -> Dict:
     if symbols:
         fresh = _fetch_live_prices(symbols)
         with _cache_lock:
-            _price_cache = fresh
-            _cache_time  = time.time()
-        return fresh
+            if fresh:
+                _price_cache = fresh
+                _cache_time  = time.time()
+            return dict(_price_cache)
 
     return {}
 
