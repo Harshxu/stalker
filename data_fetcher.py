@@ -56,8 +56,10 @@ class YFRateLimitFilter(logging.Filter):
             mark_rate_limited()
         return True
 
-# Register the filter with yfinance's internal logger
+# Register the filter with yfinance's internal logger and the root logger
 logging.getLogger("yfinance").addFilter(YFRateLimitFilter())
+logging.getLogger().addFilter(YFRateLimitFilter())
+
 
 
 def get_browser_session():
