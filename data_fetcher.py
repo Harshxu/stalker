@@ -14,6 +14,14 @@ import logging
 from datetime import datetime, date
 from typing import Dict, List, Optional, Tuple
 import config
+
+# Direct yfinance timezone cache to our safe local data directory to avoid Render permission/folder warnings
+try:
+    cache_path = os.path.join(config.DATA_DIR, "yfinance_cache")
+    os.makedirs(cache_path, exist_ok=True)
+    yf.set_tz_cache_location(cache_path)
+except Exception:
+    pass
 import contextlib
 import io
 
@@ -62,9 +70,12 @@ def is_rate_limited() -> bool:
 class YFRateLimitFilter(logging.Filter):
     def filter(self, record):
         msg = record.getMessage()
-        if "yfratelimiterror" in msg.lower() or "too many requests" in msg.lower() or "rate limited" in msg.lower():
+        msg_lower = msg.lower()
+        if "yfratelimiterror" in msg_lower or "too many requests" in msg_lower or "rate limited" in msg_lower:
             mark_rate_limited()
             return False   # Suppress raw yfinance error log entries to keep console and log files perfectly clean
+        if "failed download" in msg_lower:
+            return False
         return True
 
 
