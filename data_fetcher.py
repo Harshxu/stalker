@@ -54,7 +54,9 @@ class YFRateLimitFilter(logging.Filter):
         msg = record.getMessage()
         if "yfratelimiterror" in msg.lower() or "too many requests" in msg.lower() or "rate limited" in msg.lower():
             mark_rate_limited()
+            return False   # Suppress raw yfinance error log entries to keep console and log files perfectly clean
         return True
+
 
 # Register the filter with yfinance's internal logger and the root logger
 logging.getLogger("yfinance").addFilter(YFRateLimitFilter())
