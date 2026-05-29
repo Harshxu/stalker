@@ -130,8 +130,9 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
     last_closes: dict = {}
     try:
         with _silence_stderr_stdout():
+            tickers_str = " ".join(symbols)  # single batch request, no thread pool overflow
             daily_bulk = yf.download(
-                symbols, period="5d", interval="1d",
+                tickers_str, period="5d", interval="1d",
                 group_by="ticker", threads=False, progress=False,
             )
         for sym in symbols:
@@ -161,8 +162,9 @@ def _fetch_live_prices(symbols: List[str]) -> Dict:
         else:
             try:
                 with _silence_stderr_stdout():
+                    tickers_str = " ".join(symbols)  # single batch request
                     intraday_bulk = yf.download(
-                        symbols, period="1d", interval="1m",
+                        tickers_str, period="1d", interval="1m",
                         group_by="ticker", threads=False, progress=False,
                     )
                 for sym in symbols:

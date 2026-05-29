@@ -111,7 +111,11 @@ def get_browser_session():
             allowed_methods=["HEAD", "GET", "OPTIONS"]
         )
         
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=30,
+            pool_maxsize=30,
+        )
         _global_session.mount("https://", adapter)
         _global_session.mount("http://", adapter)
         
