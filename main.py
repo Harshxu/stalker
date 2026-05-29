@@ -795,17 +795,21 @@ def _send_email_report(eod_data: Dict):
     """Send EOD report via Brevo REST API over HTTPS."""
     try:
         date_str  = eod_data.get("date", "today")
-        perf      = eod_data.get("performance") or {}
-        win_rate  = perf.get("win_rate") if perf.get("win_rate") is not None else 0.0
-        avg_pnl   = perf.get("avg_pnl") if perf.get("avg_pnl") is not None else 0.0
-        total_picks = perf.get("total_trades") if perf.get("total_trades") is not None else 0
         picks     = eod_data.get("picks", [])
         wins      = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
         losses    = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
         
+        # Calculate today's specific 1-day metrics
+        total_executed = wins + losses
+        today_win_rate = (wins / total_executed) * 100 if total_executed > 0 else 0.0
+        
+        executed_picks = [p for p in picks if p.get("pnl_pct") is not None]
+        today_avg_pnl = (sum(p.get("pnl_pct") for p in executed_picks) / len(executed_picks)) if executed_picks else 0.0
+        today_pnl_color = "#16a34a" if today_avg_pnl >= 0 else "#dc2626"
+        
         is_test = eod_data.get("is_test", False)
         subject_prefix = "⚠️ [TEST / SIMULATED] " if is_test else ""
-        subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | Win Rate: {win_rate:.1f}% | W:{wins} L:{losses}"
+        subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | Today's WR: {today_win_rate:.1f}% | W:{wins} L:{losses}"
         
         rows_html = ""
         for i, p in enumerate(picks, 1):
@@ -891,12 +895,12 @@ def _send_email_report(eod_data: Dict):
                     <!-- Key Cards -->
                     <div style="display: flex; gap: 15px; margin-bottom: 25px;">
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">30-Day Win Rate</div>
-                            <div style="font-size: 22px; font-weight: 800; color: #1e3b8a;">{win_rate:.1f}%</div>
+                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Win Rate</div>
+                            <div style="font-size: 22px; font-weight: 800; color: #1e3b8a;">{today_win_rate:.1f}%</div>
                         </div>
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Avg Daily P&L</div>
-                            <div style="font-size: 22px; font-weight: 800; color: #16a34a;">{avg_pnl:+.2f}%</div>
+                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Avg P&L</div>
+                            <div style="font-size: 22px; font-weight: 800; color: {today_pnl_color};">{today_avg_pnl:+.2f}%</div>
                         </div>
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
                             <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Results</div>
