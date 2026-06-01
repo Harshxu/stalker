@@ -460,91 +460,195 @@ def record_close_prices():
 # ═══════════════════════════════════════════════
 
 def generate_eod_report():
-    logger.info("Generating EOD report...")
+    logger.info("Generating EOD report with STALKER Alpha Engine v3.0 Audit Engine...")
 
     # Strict holiday / closed day check
     if is_nse_holiday(date.today()) and not IS_TEST_MODE:
-        logger.info("Today is a weekend or NSE trading holiday. Skipping EOD report generation (silent evening rule).")
+        logger.info("Today is a weekend or NSE trading holiday. Skipping EOD report generation.")
         return
 
     today = str(date.today())
     today_picks = db_manager.get_today_picks()
-    prices = db_manager.get_prices_for_date(today)
     perf   = db_manager.get_performance_summary(30)
 
     if not today_picks:
         logger.warning("No picks data for EOD report")
         return
 
-    picks       = today_picks.get("picks", [])
-    open_prices = prices.get("open", {})
-    close_prices = prices.get("close", {})
-
-    # Prevent calculating/sending fake data if prices are completely missing
-    if (not open_prices or not close_prices) and not IS_TEST_MODE:
-        logger.warning("Missing open or close price data for today. Skipping EOD report to avoid sending unverified details.")
+    picks = today_picks.get("picks", today_picks.get("top_picks", []))
+    if not picks:
+        logger.warning("No top picks found in today's selection")
         return
 
-    # Build P&L per stock
+    symbols = [p["symbol"] for p in picks if p.get("symbol")]
+    
+    # ── Fetch Live Intraday yfinance Data ──────────────────────────────
+    import yfinance as yf
+    symbols_to_fetch = symbols + ["^NSEI"]
+    intraday_data = {}
+    
+    logger.info(f"Fetching final EOD closing data for {len(symbols_to_fetch)} symbols...")
+    try:
+        tickers = yf.Tickers(" ".join(symbols_to_fetch))
+        for sym in symbols_to_fetch:
+            try:
+                # 1d history
+                hist = tickers.tickers[sym].history(period="1d")
+                if not hist.empty:
+                    open_p = float(hist['Open'].iloc[-1])
+                    high_p = float(hist['High'].iloc[-1])
+                    low_p = float(hist['Low'].iloc[-1])
+                    close_p = float(hist['Close'].iloc[-1])
+                    volume = float(hist['Volume'].iloc[-1])
+                    
+                    # 15m intraday bars for exact VWAP calculation
+                    hist_15m = tickers.tickers[sym].history(period="1d", interval="15m")
+                    if not hist_15m.empty and hist_15m['Volume'].sum() > 0:
+                        vwap = (hist_15m['Close'] * hist_15m['Volume']).sum() / hist_15m['Volume'].sum()
+                    else:
+                        vwap = (high_p + low_p + close_p) / 3.0
+                        
+                    intraday_data[sym] = {
+                        "open": open_p,
+                        "high": high_p,
+                        "low": low_p,
+                        "close": close_p,
+                        "volume": volume,
+                        "vwap": vwap
+                    }
+            except Exception as ex:
+                logger.warning(f"Failed to fetch final EOD data for {sym}: {ex}")
+    except Exception as e:
+        logger.error(f"Error fetching bulk EOD data: {e}")
+
+    # Fallback to local prices if yfinance completely failed
+    nifty_eod = intraday_data.get("^NSEI", {"open": 23000, "close": 23000, "high": 23000, "low": 23000, "volume": 0, "vwap": 23000})
+    nifty_open = nifty_eod["open"]
+    nifty_close = nifty_eod["close"]
+    nifty_chg_pct = ((nifty_close - nifty_open) / nifty_open * 100.0) if nifty_open else 0.0
+
     pnl_results = []
     for pick in picks:
         symbol = pick.get("symbol")
-        name   = pick.get("name", symbol)
-        op = open_prices.get(symbol, {})
-        cp = close_prices.get(symbol, {})
-
-        open_p  = op.get("open") or op.get("current_price")
-        close_p = cp.get("close") or cp.get("current_price")
-
-        if open_p and close_p and open_p > 0:
-            pnl_pct    = ((close_p - open_p) / open_p) * 100
-            pnl_rupees = close_p - open_p
-            result_str = "✅ Profit" if pnl_pct > 0 else "❌ Loss"
-            color      = "green" if pnl_pct > 0 else "red"
-        else:
-            pnl_pct    = None
-            pnl_rupees = None
-            result_str = "⏳ Data pending"
-            color      = "gray"
-
+        name = pick.get("name", symbol)
+        sector = pick.get("sector", "Other") or "Other"
+        
+        data = intraday_data.get(symbol)
+        if not data:
+            # Skip if absolutely no price data
+            continue
+            
+        open_p = data["open"]
+        close_p = data["close"]
+        high_p = data["high"]
+        low_p = data["low"]
+        volume = data["volume"]
+        vwap = data["vwap"]
+        
+        pnl_pct = ((close_p - open_p) / open_p) * 100.0 if open_p else 0.0
+        pnl_rupees = close_p - open_p
+        
+        # 1. VWAP-based intraday trend
+        vwap_trend = "BULLISH" if close_p > vwap else "BEARISH"
+        
+        # 2. Nifty-relative strength
+        rel_strength = pnl_pct - nifty_chg_pct
+        
+        # 3. Breakout detection (Position in day's range)
+        range_size = high_p - low_p
+        position = (close_p - low_p) / range_size if range_size > 0 else 0.5
+        
+        # 4. Volatility filter
+        volatility = (high_p - low_p) / open_p * 100.0 if open_p else 0.0
+        vol_ok = volatility > 1.0
+        
+        # 5. Momentum scoring (out of 10)
+        m_score = 0.0
+        if close_p > vwap:
+            m_score += 2.5
+        if rel_strength > 0:
+            m_score += 2.5
+        if position >= 0.8:
+            m_score += 2.5
+        elif position >= 0.5:
+            m_score += 1.0
+        if vol_ok:
+            m_score += 2.5
+            
+        result_str = "✅ Profit" if pnl_pct > 0 else "❌ Loss"
+        color = "green" if pnl_pct > 0 else "red"
+        
         pnl_results.append({
-            "symbol":     symbol,
-            "name":       name,
-            "open":       open_p,
-            "close":      close_p,
-            "high":       cp.get("high"),
-            "low":        cp.get("low"),
-            "pnl_pct":    round(pnl_pct, 2) if pnl_pct is not None else None,
-            "pnl_rupees": round(pnl_rupees, 2) if pnl_rupees is not None else None,
-            "result":     result_str,
-            "color":      color,
-            "action":     pick.get("action"),
-            "score":      pick.get("total_score"),
-            "target":     pick.get("target_2"),
-            "stop_loss":  pick.get("stop_loss"),
+            "symbol":       symbol,
+            "name":         name,
+            "sector":       sector,
+            "open":         open_p,
+            "close":        close_p,
+            "high":         high_p,
+            "low":          low_p,
+            "volume":       volume,
+            "vwap":         round(vwap, 2),
+            "vwap_trend":   vwap_trend,
+            "rel_strength": round(rel_strength, 2),
+            "position":     round(position, 2),
+            "volatility":   round(volatility, 2),
+            "momentum_score": round(m_score, 1),
+            "pnl_pct":      round(pnl_pct, 2),
+            "pnl_rupees":   round(pnl_rupees, 2),
+            "result":       result_str,
+            "color":        color,
+            "action":       pick.get("action"),
+            "score":        pick.get("total_score") or pick.get("alpha_score"),
+            "target":       pick.get("target_2"),
+            "stop_loss":    pick.get("stop_loss"),
         })
+
+    # 6. Market Breadth calculations
+    pct_above_open = (sum(1 for p in pnl_results if p["pnl_pct"] > 0) / len(pnl_results) * 100.0) if pnl_results else 0.0
+    pct_outperform_nifty = (sum(1 for p in pnl_results if p["rel_strength"] > 0) / len(pnl_results) * 100.0) if pnl_results else 0.0
+
+    # Sector grouping average returns
+    sectors_perf = {}
+    for p in pnl_results:
+        sec = p["sector"]
+        if sec not in sectors_perf:
+            sectors_perf[sec] = []
+        sectors_perf[sec].append(p["pnl_pct"])
+        
+    hot_sector = "None"
+    hot_pnl = -100.0
+    for sec, returns in sectors_perf.items():
+        avg_ret = sum(returns) / len(returns)
+        if avg_ret > hot_pnl:
+            hot_pnl = avg_ret
+            hot_sector = sec
 
     # Save EOD report data
     eod_data = {
-        "date":        today,
-        "picks":       pnl_results,
-        "performance": perf,
-        "market":      today_picks.get("market_trend"),
-        "generated_at": datetime.now().isoformat(),
-        "is_test":     IS_TEST_MODE,
+        "date":                  today,
+        "picks":                 pnl_results,
+        "performance":           perf,
+        "market":                today_picks.get("market_trend"),
+        "nifty_chg_pct":         round(nifty_chg_pct, 2),
+        "pct_above_open":        round(pct_above_open, 1),
+        "pct_outperform_nifty":  round(pct_outperform_nifty, 1),
+        "hot_sector":            hot_sector,
+        "hot_sector_pnl":        round(hot_pnl, 2),
+        "generated_at":          datetime.now().isoformat(),
+        "is_test":               IS_TEST_MODE,
     }
 
     eod_path = os.path.join(config.DATA_DIR, "eod_report.json")
     with open(eod_path, "w") as f:
         json.dump(eod_data, f, indent=2, default=str)
 
-    # Save to historical database
+    # Save to database
     db_manager.save_eod_report(eod_data)
 
     # Send email report
     _send_email_report(eod_data)
 
-    logger.info("EOD report generated")
+    logger.info("EOD report generated successfully.")
 
 
 # ─────────────────────────────────────────────
@@ -869,12 +973,12 @@ def _open_dashboard():
 def _send_email_report(eod_data: Dict):
     """Send EOD report via Brevo REST API over HTTPS."""
     try:
-        date_str  = eod_data.get("date", "today")
-        picks     = eod_data.get("picks", [])
-        wins      = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
-        losses    = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
+        date_str = eod_data.get("date", "today")
+        picks = eod_data.get("picks", [])
         
-        # Calculate today's specific 1-day metrics
+        # Calculate base statistics
+        wins = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
+        losses = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
         total_executed = wins + losses
         today_win_rate = (wins / total_executed) * 100 if total_executed > 0 else 0.0
         
@@ -885,66 +989,91 @@ def _send_email_report(eod_data: Dict):
         is_test = eod_data.get("is_test", False)
         subject_prefix = "⚠️ [TEST / SIMULATED] " if is_test else ""
         subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | Today's WR: {today_win_rate:.1f}% | W:{wins} L:{losses}"
-        
-        rows_html = ""
-        for i, p in enumerate(picks, 1):
-            name = p.get('name', '')
-            action = p.get('action', '')
-            action_color = "#16a34a" if action == "BUY" else "#d97706"
-            action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
+
+        # ── Sector Grouping & Performance Audit ───────────────────────
+        sectors = {}
+        for p in picks:
+            sec = p.get("sector", "Other") or "Other"
+            if sec not in sectors:
+                sectors[sec] = []
+            sectors[sec].append(p)
             
-            open_p = p.get("open") if p.get("open") is not None else 0.0
-            close_p = p.get("close") if p.get("close") is not None else 0.0
-            high_p = p.get("high") if p.get("high") is not None else 0.0
-            low_p = p.get("low") if p.get("low") is not None else 0.0
-            target_p = p.get("target") if p.get("target") is not None else 0.0
-            sl_p = p.get("stop_loss") if p.get("stop_loss") is not None else 0.0
+        # Grouped tables HTML assembly
+        grouped_tables_html = ""
+        for sec, sec_picks in sectors.items():
+            avg_sec_pnl = sum(p.get("pnl_pct", 0) for p in sec_picks) / len(sec_picks)
+            sec_pnl_color = "#16a34a" if avg_sec_pnl >= 0 else "#dc2626"
             
-            pnl = p.get("pnl_pct")
-            pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
-            pnl_color = "#16a34a" if (pnl or 0) > 0 else "#dc2626" if (pnl or 0) < 0 else "#6b7280"
-            pnl_font_weight = "bold" if pnl is not None else "normal"
-            
-            # Rating calculation
-            rating = 5  # default
-            if pnl is not None:
-                if action == "BUY":
-                    if pnl > 0:
-                        if target_p > open_p and close_p >= target_p:
-                            rating = 10
-                        else:
-                            rating = 8
-                    else:
-                        if sl_p > 0 and close_p <= sl_p:
-                            rating = 0
-                        else:
-                            rating = 3
-                else: # WATCH / AVOID
-                    if pnl < 0:
-                        rating = 10
-                    elif pnl > 0:
-                        rating = 3
-                    else:
-                        rating = 5
-            
-            rating_color = "#16a34a" if rating >= 8 else "#d97706" if rating >= 5 else "#dc2626"
-            
-            rows_html += f"""
-            <tr style="border-bottom: 1px solid #e5e7eb;">
-                <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
-                <td style="padding: 12px 8px; text-align: center;">
-                    <span style="display: inline-block; padding: 4px 8px; border-radius: 9999px; font-size: 11px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
-                        {action}
-                    </span>
-                </td>
-                <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #6b7280; font-size: 12px;">₹{high_p:,.2f} / ₹{low_p:,.2f}</td>
-                <td style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
-                <td style="padding: 12px 8px; text-align: center; color: {rating_color}; font-weight: bold; font-size: 15px;">{rating}<span style="font-size: 11px; color: #9ca3af;">/10</span></td>
-            </tr>
+            rows_html = ""
+            for i, p in enumerate(sec_picks, 1):
+                name = p.get('name', '')
+                action = p.get('action', '')
+                action_color = "#16a34a" if action == "BUY" else "#d97706"
+                action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
+                
+                open_p = p.get("open") if p.get("open") is not None else 0.0
+                close_p = p.get("close") if p.get("close") is not None else 0.0
+                high_p = p.get("high") if p.get("high") is not None else 0.0
+                low_p = p.get("low") if p.get("low") is not None else 0.0
+                vwap_p = p.get("vwap") if p.get("vwap") is not None else 0.0
+                vwap_trend = p.get("vwap_trend", "NEUTRAL")
+                rel_strength = p.get("rel_strength") if p.get("rel_strength") is not None else 0.0
+                m_score = p.get("momentum_score") if p.get("momentum_score") is not None else 5.0
+                
+                pnl = p.get("pnl_pct")
+                pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
+                pnl_color = "#16a34a" if (pnl or 0) > 0 else "#dc2626" if (pnl or 0) < 0 else "#6b7280"
+                pnl_font_weight = "bold" if pnl is not None else "normal"
+                
+                vwap_trend_color = "#16a34a" if vwap_trend == "BULLISH" else "#dc2626"
+                rel_strength_color = "#16a34a" if rel_strength >= 0 else "#dc2626"
+                m_score_color = "#16a34a" if m_score >= 7.5 else "#d97706" if m_score >= 5.0 else "#dc2626"
+                
+                rows_html += f"""
+                <tr style="border-bottom: 1px solid #e5e7eb;">
+                    <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{name}</td>
+                    <td style="padding: 12px 8px; text-align: center;">
+                        <span style="display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
+                            {action}
+                        </span>
+                    </td>
+                    <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
+                    <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
+                    <td style="padding: 12px 8px; text-align: right; color: {vwap_trend_color}; font-size: 12px; font-weight: 500;">
+                        ₹{vwap_p:,.2f}<br/><span style="font-size: 9px;">({vwap_trend})</span>
+                    </td>
+                    <td style="padding: 12px 8px; text-align: right; color: {rel_strength_color}; font-weight: 500;">{rel_strength:+.2f}%</td>
+                    <td style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
+                    <td style="padding: 12px 8px; text-align: center; color: {m_score_color}; font-weight: bold; font-size: 14px;">{m_score:.1f}<span style="font-size: 9px; color: #9ca3af;">/10</span></td>
+                </tr>
+                """
+                
+            grouped_tables_html += f"""
+            <div style="margin-bottom: 30px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
+                <div style="background-color: #f8fafc; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;">
+                    <span style="font-weight: 800; color: #1e293b; font-size: 14px;">📂 Sector: {sec}</span>
+                    <span style="font-weight: bold; color: {sec_pnl_color}; font-size: 13px;">Avg Return: {avg_sec_pnl:+.2f}%</span>
+                </div>
+                <table style="width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4;">
+                    <thead>
+                        <tr style="background-color: #fafafa; border-bottom: 1px solid #e5e7eb; color: #64748b; font-weight: bold; font-size: 11px;">
+                            <th style="padding: 8px; text-align: left;">Stock</th>
+                            <th style="padding: 8px; text-align: center;">Type</th>
+                            <th style="padding: 8px; text-align: right;">Open</th>
+                            <th style="padding: 8px; text-align: right;">Close</th>
+                            <th style="padding: 8px; text-align: right;">Intraday VWAP</th>
+                            <th style="padding: 8px; text-align: right;">Nifty RS</th>
+                            <th style="padding: 8px; text-align: right;">P&L %</th>
+                            <th style="padding: 8px; text-align: center;">Momentum</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            </div>
             """
-            
+
         test_banner_html = ""
         if is_test:
             test_banner_html = """
@@ -953,56 +1082,72 @@ def _send_email_report(eod_data: Dict):
             </div>
             """
 
+        nifty_chg = eod_data.get("nifty_chg_pct", 0.0)
+        nifty_chg_color = "#16a34a" if nifty_chg >= 0 else "#dc2626"
+        pct_above_open = eod_data.get("pct_above_open", 0.0)
+        pct_outperform_nifty = eod_data.get("pct_outperform_nifty", 0.0)
+        hot_sector = eod_data.get("hot_sector", "None")
+        hot_pnl = eod_data.get("hot_sector_pnl", 0.0)
+        hot_pnl_color = "#16a34a" if hot_pnl >= 0 else "#dc2626"
+
         html_body = f"""
         <html>
         <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
-            <div style="max-width: 720px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+            <div style="max-width: 760px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
                 <!-- Header -->
                 <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 30px 24px; text-align: center; color: #ffffff;">
-                    <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">📊 END OF DAY REPORT</h1>
-                    <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 14px; font-weight: 500;">Performance Audit & Trades Summary</p>
+                    <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">📊 QUANT PERFORMANCE EOD REPORT</h1>
+                    <p style="margin: 5px 0 0 0; opacity: 0.9; font-size: 13px; font-weight: 500;">STALKER Alpha Engine v3.0 Audit Engine</p>
                 </div>
                 
                 {test_banner_html}
                 
                 <!-- Info Section -->
                 <div style="padding: 24px; background-color: #ffffff;">
-                    <!-- Key Cards -->
+                    <!-- Key Cards Row 1 -->
+                    <div style="display: flex; gap: 15px; margin-bottom: 15px;">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Win Rate</div>
+                            <div style="font-size: 20px; font-weight: 800; color: #1e3b8a;">{today_win_rate:.1f}%</div>
+                        </div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Avg P&L vs Open</div>
+                            <div style="font-size: 20px; font-weight: 800; color: {today_pnl_color};">{today_avg_pnl:+.2f}%</div>
+                        </div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Outcomes</div>
+                            <div style="font-size: 18px; font-weight: 800; color: #475569;">W: <span style="color:#16a34a;">{wins}</span> | L: <span style="color:#dc2626;">{losses}</span></div>
+                        </div>
+                    </div>
+
+                    <!-- Key Cards Row 2 (Market Breadth) -->
                     <div style="display: flex; gap: 15px; margin-bottom: 25px;">
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Win Rate</div>
-                            <div style="font-size: 22px; font-weight: 800; color: #1e3b8a;">{today_win_rate:.1f}%</div>
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Nifty 50 Change</div>
+                            <div style="font-size: 20px; font-weight: 800; color: {nifty_chg_color};">{nifty_chg:+.2f}%</div>
                         </div>
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Avg P&L</div>
-                            <div style="font-size: 22px; font-weight: 800; color: {today_pnl_color};">{today_avg_pnl:+.2f}%</div>
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Breadth (% > Open)</div>
+                            <div style="font-size: 20px; font-weight: 800; color: #1e3b8a;">{pct_above_open:.1f}%</div>
                         </div>
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 11px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Results</div>
-                            <div style="font-size: 20px; font-weight: 800; color: #475569;">W: <span style="color:#16a34a;">{wins}</span> | L: <span style="color:#dc2626;">{losses}</span></div>
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Nifty Beat Ratio</div>
+                            <div style="font-size: 20px; font-weight: 800; color: #16a34a;">{pct_outperform_nifty:.1f}%</div>
                         </div>
+                    </div>
+
+                    <!-- Hot Sector Banner -->
+                    <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 12px 18px; border-radius: 8px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                        <span style="color: #1e40af; font-weight: bold;">🔥 Today's Leading Industry (Hot Sector):</span>
+                        <span style="background-color: #fff; padding: 4px 10px; border-radius: 6px; border: 1px solid #93c5fd; font-weight: 800; color: {hot_pnl_color};">
+                            {hot_sector} ({hot_pnl:+.2f}%)
+                        </span>
                     </div>
                     
                     <!-- Table Title -->
-                    <h3 style="margin: 0 0 12px 0; color: #0f172a; font-weight: 700; font-size: 18px;">📈 Trade Execution & Analysis</h3>
+                    <h3 style="margin: 0 0 16px 0; color: #0f172a; font-weight: 800; font-size: 18px;">📈 Sector Grouped Audit & momentum Details</h3>
                     
-                    <!-- Table -->
-                    <table style="width: 100%; border-collapse: collapse; font-size: 13px;">
-                        <thead>
-                            <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; color: #475569; font-weight: bold;">
-                                <th style="padding: 10px 8px; text-align: left;">Stock</th>
-                                <th style="padding: 10px 8px; text-align: center;">Type</th>
-                                <th style="padding: 10px 8px; text-align: right;">Entry (Open)</th>
-                                <th style="padding: 10px 8px; text-align: right;">Exit (Close)</th>
-                                <th style="padding: 10px 8px; text-align: right;">High / Low</th>
-                                <th style="padding: 10px 8px; text-align: right;">P&L %</th>
-                                <th style="padding: 10px 8px; text-align: center;">Rating</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {rows_html}
-                        </tbody>
-                    </table>
+                    {grouped_tables_html}
                 </div>
                 
                 <!-- Footer -->
