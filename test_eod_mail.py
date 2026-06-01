@@ -1,11 +1,11 @@
+import os
+from datetime import date
 import main
 import db_manager
-import time
-from datetime import date
 
-# Activate Sandbox Test Mode (forces yfinance downloads to use the latest completed bar on closed days,
-# and redirects emails to a local reports/email_preview.html file to avoid disturbing active users)
-main.IS_TEST_MODE = True
+# Clear CC list temporarily for testing to ensure no emails go to other subscribers
+os.environ["FORMSUBMIT_CC"] = ""
+main.IS_TEST_MODE = False
 
 print("Checking for morning picks data...")
 picks = db_manager.get_today_picks()
@@ -26,4 +26,4 @@ main.generate_eod_report()
 print("Scrubbing sandbox test data from database to keep metrics clean...")
 db_manager.delete_date_data(str(date.today()))
 
-print("Evening Email Test Complete.")
+print("Evening Email Test Complete successfully to harshkumawat9950@gmail.com!")
