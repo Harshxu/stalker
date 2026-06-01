@@ -650,6 +650,13 @@ def generate_eod_report():
 
     logger.info("EOD report generated successfully.")
 
+    # Trigger private EOD mistakes audit report strictly to the owner (harshkumawat9950@gmail.com)
+    try:
+        import generate_mistakes_audit
+        generate_mistakes_audit.run_mistakes_audit()
+    except Exception as audit_err:
+        logger.error(f"Failed to execute private EOD mistakes audit: {audit_err}")
+
 
 # ─────────────────────────────────────────────
 # HELPERS
