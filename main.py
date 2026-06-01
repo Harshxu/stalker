@@ -339,16 +339,28 @@ def run_morning_scan():
 
         # 4. If still empty (meaning 7:00 AM pre-market analysis failed or was skipped), run new scan
         if not _today_scan_result:
-            logger.warning("No pre-computed 7:00 AM picks found in DB or local fallback. Initiating immediate scan...")
-            result = screener.run_screen(top_n=config.TOP_PICKS_COUNT)
-            _today_scan_result = result
-            picks = result.get("top_picks", [])
-            _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
-            db_manager.save_daily_picks(result)
-            scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
-            with open(scan_path, "w") as f:
-                json.dump(result, f, indent=2, default=str)
-            _print_picks_summary(result)
+            logger.warning("No pre-computed 7:00 AM picks found in DB or local fallback. Initiating emergency scan...")
+            try:
+                result = screener.run_screen(top_n=config.TOP_PICKS_COUNT)
+                _today_scan_result = result
+                picks = result.get("top_picks", [])
+                _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
+                if not picks:
+                    raise ValueError("Emergency screener returned zero picks")
+                db_manager.save_daily_picks(result)
+                scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+                with open(scan_path, "w") as f:
+                    json.dump(result, f, indent=2, default=str)
+                _print_picks_summary(result)
+            except Exception as scan_err:
+                logger.critical(f"Emergency scan also failed: {scan_err}. Aborting email — alerting admin.")
+                _send_admin_alert(
+                    "Pre-Market Analysis Completely Failed",
+                    f"Emergency scan error: {scan_err}. "
+                    "The 7:00 AM pre-market job did NOT run (scheduler may have been stopped or run in --mode serve). "
+                    "No picks email was sent to users. Please restart: python main.py --mode run"
+                )
+                return
         else:
             logger.info(f"Using pre-market picks: {len(_today_symbols_picked)} stocks ready")
 
@@ -360,6 +372,13 @@ def run_morning_scan():
 
     except Exception as e:
         logger.error(f"Morning email dispatch failed: {e}", exc_info=True)
+        try:
+            _send_admin_alert(
+                "Morning Email Dispatch Crashed",
+                f"Unhandled exception: {e}"
+            )
+        except Exception:
+            pass
 
 
 # ═══════════════════════════════════════════════
@@ -532,8 +551,16 @@ def generate_eod_report():
 # HELPERS
 # ─────────────────────────────────────────────
 
-def _send_via_brevo(subject: str, html_body: str) -> bool:
-    """Send an email using Brevo REST API over HTTPS."""
+def _send_via_brevo(subject: str, html_body: str, admin_only: bool = False) -> bool:
+    """
+    Send an email using Brevo REST API over HTTPS.
+    If admin_only=True, the CC list is suppressed (error alerts go only to the admin).
+    """
+    # ── SAFETY GUARD: Never send a blank/near-empty email ──────────────────
+    if not html_body or len(html_body.strip()) < 200:
+        logger.critical("[BREVO] Blocked sending: html_body is empty or too short. Aborting to avoid blank email.")
+        return False
+
     if IS_TEST_MODE:
         logger.info(f"[TEST_MODE] Real email send bypassed to avoid disturbing users. Subject: {subject}")
         preview_path = os.path.join(config.REPORTS_DIR, "email_preview.html")
@@ -564,10 +591,11 @@ def _send_via_brevo(subject: str, html_body: str) -> bool:
         "htmlContent": html_body,
     }
     
-    # Add CC if configured
-    cc_emails = os.getenv("FORMSUBMIT_CC", "")
-    if cc_emails:
-        payload["cc"] = [{"email": email.strip()} for email in cc_emails.split(",") if email.strip()]
+    # Add CC only if not an admin-only alert
+    if not admin_only:
+        cc_emails = os.getenv("FORMSUBMIT_CC", "")
+        if cc_emails:
+            payload["cc"] = [{"email": email.strip()} for email in cc_emails.split(",") if email.strip()]
 
     try:
         resp = requests.post(
@@ -581,7 +609,7 @@ def _send_via_brevo(subject: str, html_body: str) -> bool:
             timeout=15,
         )
         if resp.status_code in (200, 201):
-            logger.info(f"[BREVO] Email successfully sent to {mail_to}")
+            logger.info(f"[BREVO] Email successfully sent to {mail_to}{' (admin-only)' if admin_only else ''}")
             return True
         else:
             logger.error(f"[BREVO] Failed to send email (HTTP {resp.status_code}): {resp.text[:300]}")
@@ -591,12 +619,59 @@ def _send_via_brevo(subject: str, html_body: str) -> bool:
         return False
 
 
+def _send_admin_alert(reason: str, detail: str = ""):
+    """
+    Send an admin-only alert email when a critical system failure is detected.
+    This goes ONLY to the admin (FORMSUBMIT_TO), never to CC/users.
+    """
+    date_str = datetime.now().strftime('%A, %d %B %Y — %I:%M %p IST')
+    subject = f"🚨 STALKER ALERT: {reason}"
+    html_body = f"""
+    <html>
+    <body style="font-family: 'Segoe UI', sans-serif; background: #fef2f2; padding: 20px; margin: 0;">
+        <div style="max-width: 600px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; border: 2px solid #dc2626;">
+            <div style="background: #dc2626; padding: 24px; text-align: center; color: #fff;">
+                <h1 style="margin: 0; font-size: 22px;">🚨 STALKER SYSTEM ALERT</h1>
+                <p style="margin: 6px 0 0; font-size: 13px; opacity: 0.9;">{date_str}</p>
+            </div>
+            <div style="padding: 28px;">
+                <h3 style="color: #dc2626; margin: 0 0 12px;">{reason}</h3>
+                <p style="color: #374151; font-size: 14px; line-height: 1.7; margin: 0 0 16px;">
+                    The STALKER pre-market analysis or morning email encountered a critical failure.
+                    <strong>No picks email was sent to users.</strong>
+                </p>
+                {f'<div style="background: #fef2f2; border-left: 4px solid #dc2626; padding: 12px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #374151; word-break: break-all;">{detail}</div>' if detail else ''}
+                <p style="color: #6b7280; font-size: 13px; margin: 20px 0 0;">
+                    👉 Please restart the STALKER scheduler (<code>python main.py --mode run</code>) and check the logs.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    logger.critical(f"[ALERT] Sending admin-only failure alert: {reason}")
+    _send_via_brevo(subject, html_body, admin_only=True)
+
+
 def _send_morning_email(scan_result: Dict, verification: Dict = None):
     try:
         picks    = scan_result.get("top_picks", [])[:10]
         market   = scan_result.get("market_trend", "unknown").upper()
         date_str = str(date.today())
         ver      = verification or {}
+
+        # ── SAFETY GUARD: Never send a blank picks email ──────────────────
+        if not picks:
+            logger.critical(
+                "[MORNING EMAIL] Blocked: picks list is EMPTY. "
+                "Pre-market analysis likely failed. Sending admin-only alert."
+            )
+            _send_admin_alert(
+                "Morning Email Aborted — Zero Picks Available",
+                f"scan_result keys: {list(scan_result.keys())}. "
+                f"market_trend={market}. This means the 7:00 AM screener returned no stocks."
+            )
+            return
 
         # ── Verification badge HTML ───────────────────────────────────────
         qual = ver.get("data_quality", "")

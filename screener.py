@@ -545,9 +545,31 @@ def run_screen(symbols: Optional[List[str]] = None,
             logger.error(f"Error in detailed scoring for {symbol}: {e}")
             continue
 
-    # ── Step 5: Sort & Return Top N ──────────────────
+    # ── Step 5: Sort & Return Top N (with sector diversity) ──────────────
     results.sort(key=lambda x: x["total_score"], reverse=True)
-    top_picks = results[:top_n]
+
+    # Enforce sector diversity — max 2 stocks per sector in final picks
+    MAX_PER_SECTOR = 2
+    sector_counts: Dict[str, int] = {}
+    top_picks = []
+    overflow = []  # Stocks pushed out due to sector cap
+
+    for stock in results:
+        sector = stock.get("sector", stock.get("industry", "Unknown")) or "Unknown"
+        count = sector_counts.get(sector, 0)
+        if count < MAX_PER_SECTOR:
+            top_picks.append(stock)
+            sector_counts[sector] = count + 1
+            if len(top_picks) >= top_n:
+                break
+        else:
+            overflow.append(stock)
+
+    # If we still need more picks (rare edge case), fill from overflow
+    if len(top_picks) < top_n:
+        remaining = top_n - len(top_picks)
+        top_picks.extend(overflow[:remaining])
+
 
     elapsed = (datetime.now() - start_time).seconds
     print(f"\n✅ Scan complete: {len(all_history)} scanned, {qualified} qualified, top {len(top_picks)} selected ({elapsed}s)")
