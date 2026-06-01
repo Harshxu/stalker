@@ -573,34 +573,40 @@ def api_schedule() -> Dict:
 
     TASKS = [
         {
-            "name":      "Pre-Market Analysis",
+            "name":      "Pre-Market 12-Layer Quant Scan",
             "icon":      "🔍",
             "scheduled": "07:00",
-            "desc":      f"Full NSE+BSE scan ({len(config.ALL_SYMBOLS)} stocks) using 6-layer scoring — picks today's top 15-20",
+            "desc":      f"Data Quality (>=70), Liquidity & Drawdown filters active. Scans {len(config.ALL_SYMBOLS)} stocks and ranks by Adjusted Alpha Score.",
         },
         {
-            "name":      "Morning Email Dispatch",
+            "name":      "Price Drift Verification",
+            "icon":      "⚖️",
+            "scheduled": "08:15",
+            "desc":      "Cross-checks entry prices of today's picks against the live yfinance feed to correct pre-market price drift.",
+        },
+        {
+            "name":      "Quant Portfolio Email Dispatch",
             "icon":      "📧",
             "scheduled": "08:30",
-            "desc":      "Today's top picks emailed to inbox before market opens at 9:15 AM",
+            "desc":      "Pearson daily correlation filter (r > 0.80) and sector caps applied. Today's top picks emailed to subscribers.",
         },
         {
             "name":      "Open Prices Locked",
             "icon":      "🔐",
             "scheduled": "09:20",
-            "desc":      "Entry prices recorded once market stabilises after opening",
+            "desc":      "Entry prices recorded once market stabilises after opening to track P&L performance.",
         },
         {
-            "name":      "Close Prices Recorded",
+            "name":      "Closing Prices Recorded",
             "icon":      "📦",
             "scheduled": "15:35",
-            "desc":      "End-of-day prices saved to MongoDB for P&L calculation",
+            "desc":      "End-of-day closing prices recorded to MongoDB database for performance audit.",
         },
         {
-            "name":      "EOD Report & Email",
+            "name":      "EOD Quant Performance & Market Breadth Audit",
             "icon":      "📊",
             "scheduled": "16:00",
-            "desc":      "Full P&L results, trade ratings and performance summary emailed",
+            "desc":      "Calculates VWAP relative strength, breakout positions, sector grouping, and market breadth emailed to subscribers.",
         },
     ]
 
