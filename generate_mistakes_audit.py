@@ -337,10 +337,9 @@ def run_mistakes_audit():
     </html>
     """
 
-    # Trigger sending with CC suppressed
-    os.environ["FORMSUBMIT_CC"] = ""
-    main.IS_TEST_MODE = False
-    
+    # Trigger sending with CC suppressed.
+    # Note: We pass admin_only=True to _send_via_brevo which naturally suppresses the CC list,
+    # so we do not mutate os.environ["FORMSUBMIT_CC"] or main.IS_TEST_MODE globally.
     logger.info("Dispatching private EOD self-correction audit mail to owner...")
     main._send_via_brevo(subject, html_body, admin_only=True)
     logger.info("[OK] Mistakes audit dispatch complete.")
