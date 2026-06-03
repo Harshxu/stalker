@@ -41,7 +41,7 @@ NIFTY50_SYMBOLS = [
     "AXISBANK.NS", "KOTAKBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
     "WIPRO.NS", "NTPC.NS", "POWERGRID.NS", "ADANIPORTS.NS", "ULTRACEMCO.NS",
     "BAJAJFINSV.NS", "TECHM.NS", "M&M.NS", "NESTLEIND.NS", "ONGC.NS",
-    "COALINDIA.NS", "TATAMOTORS.NS", "HCLTECH.NS", "GRASIM.NS", "BPCL.NS",
+    "COALINDIA.NS", "TMPV.NS", "HCLTECH.NS", "GRASIM.NS", "BPCL.NS",
     "INDUSINDBK.NS", "TATASTEEL.NS", "CIPLA.NS", "DRREDDY.NS", "DIVISLAB.NS",
     "SBILIFE.NS", "APOLLOHOSP.NS", "HDFCLIFE.NS", "EICHERMOT.NS", "HEROMOTOCO.NS",
     "JSWSTEEL.NS", "HINDALCO.NS", "SHRIRAMFIN.NS", "BEL.NS", "TRENT.NS",
@@ -50,8 +50,8 @@ NIFTY50_SYMBOLS = [
 
 # Additional liquid mid-cap & high-growth candidates (railways, energy, financials, etc.)
 MIDCAP_SYMBOLS = [
-    "ZOMATO.NS", "PAYTM.NS", "IRCTC.NS", "CANBK.NS", "PNB.NS",
-    "BANKBARODA.NS", "SAIL.NS", "NHPC.NS", "IOC.NS", "HPCL.NS",
+    "ETERNAL.NS", "PAYTM.NS", "IRCTC.NS", "CANBK.NS", "PNB.NS",
+    "BANKBARODA.NS", "SAIL.NS", "NHPC.NS", "IOC.NS", "HINDPETRO.NS",
     "RECLTD.NS", "PFC.NS", "IRFC.NS", "BHEL.NS", "HAL.NS",
     "MARICO.NS", "PIDILITIND.NS", "DABUR.NS", "COLPAL.NS", "LUPIN.NS",
     "AUROPHARMA.NS", "TORNTPHARM.NS", "GLAXO.NS", "MPHASIS.NS", "LTTS.NS",
@@ -67,14 +67,14 @@ MIDCAP_SYMBOLS = [
     "BANDHANBNK.NS", "RBLBANK.NS", "LICHSGFIN.NS",
     # IT & High Tech
     "KPITTECH.NS", "COFORGE.NS", "PERSISTENT.NS", "CYIENT.NS", "TATAELXSI.NS", 
-    "LTIM.NS", "OFSS.NS", "ZENSARTECH.NS", "MAPMYINDIA.NS", "AFFLE.NS",
+    "LTM.NS", "OFSS.NS", "ZENSARTECH.NS", "MAPMYINDIA.NS", "AFFLE.NS",
     # Real Estate & Infra
-    "DLF.NS", "GODREJPROP.NS", "OBEROLRLTY.NS", "PRESTIGE.NS", "SOBHA.NS", 
-    "NBCC.NS", "NCC.NS", "GMRINFRA.NS", "IRB.NS", "HFCL.NS", "KEC.NS", 
+    "DLF.NS", "GODREJPROP.NS", "OBEROIRLTY.NS", "PRESTIGE.NS", "SOBHA.NS", 
+    "NBCC.NS", "NCC.NS", "GMRAIRPORT.NS", "IRB.NS", "HFCL.NS", "KEC.NS", 
     "ENGINERSIN.NS",
     # Automotive, Tyres & Ancillaries
     "ASHOKLEY.NS", "TVSMOTOR.NS", "BALKRISIND.NS", "APOLLOTYRE.NS", 
-    "CEAT.NS", "JKTYRE.NS", "EXIDEIND.NS", "AMARAJABAT.NS", "UNOINDA.NS", 
+    "CEATLTD.NS", "JKTYRE.NS", "EXIDEIND.NS", "ARE&M.NS", "UNOMINDA.NS", 
     "CIEINDIA.NS",
     # Pharma, Healthcare & Biotech
     "BIOCON.NS", "GLENMARK.NS", "IPCALAB.NS", "LAURUSLABS.NS", 
@@ -97,7 +97,7 @@ BSE_SYMBOLS = [
     "GODREJCP.BO",   "EMAMILTD.BO",   "VBL.BO",        "JUBLFOOD.BO",
     "BERGEPAINT.BO",
     # IT & Tech
-    "PERSISTENT.BO", "COFORGE.BO",    "LTIM.BO",       "TATAELXSI.BO",
+    "PERSISTENT.BO", "COFORGE.BO",    "LTM.BO",        "TATAELXSI.BO",
     # Infrastructure & Manufacturing
     "POLYCAB.BO",    "HAVELLS.BO",    "VOLTAS.BO",     "CROMPTON.BO",
     "ASTRAL.BO",     "KAJARIACER.BO", "SUPREMEIND.BO",
@@ -127,12 +127,21 @@ MIN_STOCK_PRICE = 50       # Avoid penny stocks
 # ─────────────────────────────────────────────
 # SCORING WEIGHTS (Total = 100)
 # ─────────────────────────────────────────────
-WEIGHT_MARKET_STRUCTURE = 25
-WEIGHT_VOLUME            = 20
-WEIGHT_TECHNICAL         = 20
-WEIGHT_MOMENTUM          = 15
-WEIGHT_FUNDAMENTALS      = 10
-WEIGHT_RISK_REWARD       = 10
+WEIGHT_RS = 15
+WEIGHT_MARKET_STRUCTURE = 15
+WEIGHT_TECHNICAL = 15
+WEIGHT_INSTITUTIONAL = 15
+WEIGHT_FUNDAMENTALS = 20
+WEIGHT_EARNINGS = 10
+WEIGHT_SECTOR = 5
+WEIGHT_OPPORTUNITY = 5
+
+# ─────────────────────────────────────────────
+# LIQUIDITY & TRANSACTION COSTS
+# ─────────────────────────────────────────────
+MIN_DAILY_TURNOVER = 100000000  # ₹10 Crore/day
+SLIPPAGE_PCT = 0.0010           # 0.10% slippage assumption
+BROKERAGE_PCT = 0.0005          # 0.05% brokerage assumption
 
 # ─────────────────────────────────────────────
 # TECHNICAL INDICATOR SETTINGS
@@ -150,7 +159,7 @@ VWAP_TOLERANCE = 0.005     # 0.5% tolerance for "above VWAP"
 # ─────────────────────────────────────────────
 # MARKET STRUCTURE SETTINGS
 # ─────────────────────────────────────────────
-SWING_LOOKBACK = 5         # Candles to look back for swing highs/lows
+SWING_LOOKBACK = 8         # Candles to look back for swing highs/lows (wider for daily charts)
 MIN_SWING_MOVE = 0.01      # Minimum 1% move to qualify as swing
 
 # ─────────────────────────────────────────────
@@ -158,9 +167,12 @@ MIN_SWING_MOVE = 0.01      # Minimum 1% move to qualify as swing
 # ─────────────────────────────────────────────
 MIN_RISK_REWARD = 1.5      # Minimum R:R ratio (1:1.5)
 IDEAL_RISK_REWARD = 2.0    # Ideal R:R ratio (1:2)
-MAX_CAPITAL_RISK_PCT = 0.02  # Risk max 2% of capital per trade
-STOP_LOSS_ATR_MULT = 1.5   # Stop loss = 1.5x ATR below entry
+ACCOUNT_SIZE = 1000000.0   # Default ₹10 Lakhs account size
+RISK_PER_TRADE_PCT = 0.02  # Risk max 2% of capital per trade
+MAX_CAPITAL_RISK_PCT = 0.02  # Keeping for backward compatibility
+STOP_LOSS_ATR_MULT = 2.0   # Stop loss = 2.0x ATR below entry (wider to avoid noise triggers)
 DAILY_LOSS_LIMIT_PCT = 0.03  # Stop trading after 3% daily drawdown
+STRICT_BULL_ONLY_BUY = True   # Force all picks to WATCH when market trend is Neutral or Bear
 
 # ─────────────────────────────────────────────
 # FUNDAMENTAL THRESHOLDS
@@ -172,7 +184,7 @@ MIN_MARKET_CAP = 5000      # Min market cap in crores (₹5,000 Cr)
 # ─────────────────────────────────────────────
 # DATA SETTINGS
 # ─────────────────────────────────────────────
-HISTORY_PERIOD = "3mo"     # 3 months history
+HISTORY_PERIOD = "1y"     # 1 year history to support true 200 MA
 INTRADAY_INTERVAL = "15m"  # 15-minute candles for setup
 DAILY_INTERVAL = "1d"      # Daily candles for trend
 TOP_PICKS_COUNT = 15       # Return top 15 picks (user can see 10-15)

@@ -8,18 +8,61 @@ from typing import Dict
 import config
 
 
-def score_fundamentals(fund: Dict) -> Dict:
-    """
-    Score a company's fundamentals out of 10.
-    Returns score + individual sub-scores + readable flags.
-    """
-    score  = 0.0
-    flags  = []
-    alerts = []
+import numpy as np
+from typing import Dict, List
+import config
 
-    # ── Price Filter (Hard Rule) ──────────────────────
+
+def compute_growth_trend_metric(y: List[float]) -> float:
+    """
+    Computes a linear regression trend metric that rewards:
+    - Magnitude: Regression slope normalized by mean absolute value of the series.
+    - Consistency: Pearson correlation coefficient between quarters and values.
+    - Acceleration: Regression slope fitted to quarter-on-quarter changes.
+    """
+    if len(y) < 2:
+        return 0.0
+    try:
+        y_arr = np.array(y, dtype=float)
+        mean_val = np.mean(np.abs(y_arr))
+        if mean_val == 0:
+            mean_val = 1e-10
+            
+        x = np.arange(len(y_arr))
+        slope, _ = np.polyfit(x, y_arr, 1)
+        relative_slope = slope / mean_val
+        
+        # Consistency (r between time index and values)
+        if len(y_arr) >= 3:
+            r = np.corrcoef(x, y_arr)[0, 1]
+            consistency = r if not np.isnan(r) else 0.0
+        else:
+            consistency = 1.0 if y_arr[-1] > y_arr[0] else -1.0 if y_arr[-1] < y_arr[0] else 0.0
+            
+        # Acceleration (slope of quarterly changes)
+        if len(y_arr) >= 3:
+            diffs = np.diff(y_arr)
+            acc_slope, _ = np.polyfit(np.arange(len(diffs)), diffs, 1)
+            acceleration = acc_slope / mean_val
+        else:
+            acceleration = 0.0
+            
+        # Composite score
+        return float(0.5 * relative_slope + 0.3 * consistency + 0.2 * acceleration)
+    except Exception:
+        return 0.0
+
+
+def score_fundamentals(fund: Dict, roe_rank: float = 50.0, profit_growth_rank: float = 50.0,
+                       revenue_growth_rank: float = 50.0, sales_growth_rank: float = 50.0,
+                       earnings_revision_rank: float = 50.0, margin_expansion_rank: float = 50.0,
+                       roe_trend_rank: float = 50.0) -> Dict:
+    """
+    Score a company's fundamentals out of 10 using continuous percentile ranks.
+    Combines Static Health (70%) and dynamic trend regression (30%).
+    """
     current_price = fund.get("current_price") or 0
-    if current_price and (current_price > config.MAX_STOCK_PRICE or current_price < config.MIN_STOCK_PRICE):
+    if current_price and (current_price > getattr(config, "MAX_STOCK_PRICE", 10000) or current_price < getattr(config, "MIN_STOCK_PRICE", 50)):
         return {
             "score": 0,
             "disqualified": True,
@@ -28,107 +71,59 @@ def score_fundamentals(fund: Dict) -> Dict:
             "alerts": ["Price out of range"],
         }
 
-    # ── Market Cap (min ₹5,000 Cr) ───────────────────
     market_cap = fund.get("market_cap", 0) or 0
-    if market_cap > 0:
-        market_cap_cr = market_cap / 1e7   # Convert to Crores
-        if market_cap_cr >= config.MIN_MARKET_CAP:
-            score += 2.0
-            flags.append("Large & liquid company")
-        elif market_cap_cr >= 1000:
-            score += 1.0
-            flags.append("Mid-cap company")
-        else:
-            alerts.append("Small company — higher risk")
+    market_cap_cr = market_cap / 1e7
+    if market_cap_cr < getattr(config, "MIN_MARKET_CAP", 5000):
+        return {
+            "score": 0,
+            "disqualified": True,
+            "reason": f"Market Cap ₹{market_cap_cr:.0f} Cr is below minimum ₹{config.MIN_MARKET_CAP} Cr",
+            "flags": [],
+            "alerts": ["Market Cap too low"],
+        }
 
-    # ── Debt to Equity ───────────────────────────────
+    # ── Static Health Score (Max 7.0) ─────────────────
+    # Average of roe_rank, profit_growth_rank, and revenue_growth_rank
+    static_avg = (roe_rank + profit_growth_rank + revenue_growth_rank) / 3.0
+    static_score = (static_avg / 100.0) * 7.0
+
+    # ── Dynamic Trend Score (Max 3.0) ──────────────────
+    # Average of sales_growth_rank, margin_expansion_rank, earnings_revision_rank, and roe_trend_rank
+    trend_avg = (sales_growth_rank + margin_expansion_rank + earnings_revision_rank + roe_trend_rank) / 4.0
+    trend_score = (trend_avg / 100.0) * 3.0
+
+    # ── Leverage Debt Penalty ─────────────────────────
     de = fund.get("debt_to_equity")
+    de_penalty = 0.0
+    flags = []
+    alerts = []
+
     if de is not None:
-        if de <= 0.3:
-            score += 2.5
+        if de > getattr(config, "MAX_DEBT_TO_EQUITY", 1.5):
+            de_penalty = 1.5
+            alerts.append(f"High debt levels (D/E: {de:.2f})")
+        elif de <= 0.3:
             flags.append("Very low debt")
-        elif de <= 0.8:
-            score += 2.0
+        else:
             flags.append("Manageable debt")
-        elif de <= config.MAX_DEBT_TO_EQUITY:
-            score += 1.0
-        else:
-            score -= 1.0
-            alerts.append("High debt levels")
-    else:
-        score += 1.0   # Neutral when data unavailable
 
-    # ── Return on Equity (ROE) ───────────────────────
-    roe = fund.get("roe")
-    if roe is not None:
-        roe_pct = roe * 100
-        if roe_pct >= 20:
-            score += 2.0
-            flags.append("High profitability (ROE > 20%)")
-        elif roe_pct >= 12:
-            score += 1.5
-            flags.append("Good profitability")
-        elif roe_pct >= 0:
-            score += 0.5
-        else:
-            alerts.append("Company losing money on equity")
+    if roe_rank >= 70.0:
+        flags.append("Top-tier profitability")
+    if profit_growth_rank >= 70.0:
+        flags.append("Top-tier growth")
 
-    # ── Revenue/Earnings Growth ──────────────────────
-    rev_growth = fund.get("revenue_growth")
-    profit_growth = fund.get("profit_growth")
-
-    if profit_growth is not None:
-        pg = profit_growth * 100
-        if pg >= 20:
-            score += 2.0
-            flags.append(f"Strong profit growth ({pg:.1f}%)")
-        elif pg >= 10:
-            score += 1.0
-            flags.append(f"Growing profits ({pg:.1f}%)")
-        elif pg < 0:
-            alerts.append("Declining profits")
-
-    elif rev_growth is not None:
-        rg = rev_growth * 100
-        if rg >= 15:
-            score += 1.0
-            flags.append(f"Revenue growing ({rg:.1f}%)")
-
-    # ── Recent Earnings Beat ─────────────────────────
-    if fund.get("has_recent_earnings"):
-        surprise = fund.get("earnings_surprise")
-        if surprise and surprise > 5:
-            score += 1.5
-            flags.append(f"Recent earnings beat (+{surprise:.1f}% surprise)")
-        elif surprise and surprise > 0:
-            score += 0.5
-            flags.append("Recent earnings on track")
-        elif surprise and surprise < -5:
-            alerts.append("Recent earnings miss")
-            score -= 0.5
-
-    # ── P/E Ratio Check ─────────────────────────────
-    pe = fund.get("pe_ratio")
-    if pe is not None and pe > 0:
-        if pe < 15:
-            flags.append("Value stock (low P/E)")
-            score += 0.5
-        elif pe > 80:
-            alerts.append("Expensive valuation (very high P/E)")
-
-    # Cap the score at 10
-    score = max(0, min(10, score))
+    total_score = max(0.0, min(10.0, static_score + trend_score - de_penalty))
 
     return {
-        "score":         round(score, 2),
+        "score":         round(total_score, 2),
         "disqualified":  False,
         "reason":        None,
         "flags":         flags,        # Positive signals
         "alerts":        alerts,       # Warning signals
-        "market_cap_cr": round((fund.get("market_cap", 0) or 0) / 1e7, 0),
+        "market_cap_cr": round(market_cap_cr, 0),
         "de_ratio":      de,
         "roe_pct":       round((fund.get("roe") or 0) * 100, 1),
-        "pe_ratio":      pe,
+        "pe_ratio":      fund.get("pe_ratio"),
     }
 
 

@@ -14,15 +14,16 @@ def calculate_stop_loss(current_price: float, atr: float,
                          swing_support: Optional[float] = None) -> float:
     """
     Stop loss = best of:
-    - 1.5x ATR below current price
+    - 2.0x ATR below current price (wider to survive intraday noise)
     - Just below recent swing low (if available)
+    Pick the WIDER (lower) stop to avoid noise triggers.
     """
     atr_stop = current_price - (config.STOP_LOSS_ATR_MULT * atr)
 
     if swing_support and swing_support < current_price:
         swing_stop = swing_support * 0.99   # 1% below swing low
-        # Use whichever stop is tighter but still below current price
-        stop = max(atr_stop, swing_stop)
+        # Use whichever stop is WIDER (lower) to survive normal volatility
+        stop = min(atr_stop, swing_stop)
     else:
         stop = atr_stop
 
@@ -99,20 +100,46 @@ def get_risk_profile(score: float, ms_structure: str, volume_surge: bool) -> str
         return "High Risk"
 
 
-def get_trade_type(ms_structure: str, gap_pct: float, rsi: float) -> str:
+def get_trade_type(ms_structure: str, gap_pct: float, rsi: float, indic: dict = None, fund: dict = None) -> str:
     """
-    Suggest trade type in plain English for the end user.
+    Suggest setup type in plain English for the end user and tracking database.
+    Setups: BREAKOUT, PULLBACK, MOMENTUM, VALUE_MOMENTUM, EARNINGS_RUNNER
     """
-    if gap_pct >= config.GAP_UP_THRESHOLD and ms_structure in ["uptrend", "breakout"]:
-        return "Gap & Go"
-    elif ms_structure == "breakout":
-        return "Breakout Trade"
-    elif ms_structure == "uptrend" and rsi < 60:
-        return "Trend Continuation"
-    elif ms_structure == "uptrend":
-        return "Momentum Trade"
-    else:
-        return "Watchlist Only"
+    indic = indic or {}
+    fund = fund or {}
+    try:
+        dist_ema20 = float(indic.get("dist_from_ema20", 0.0))
+        vol_ratio = float(indic.get("volume_ratio", 1.0))
+        ema_aligned = indic.get("ema_aligned", False)
+        
+        # Check Earnings Runner first
+        earn_surprise = fund.get("earnings_surprise") or 0.0
+        profit_growth = fund.get("profit_growth") or 0.0
+        if (earn_surprise > 5.0 or profit_growth > 0.20) and ema_aligned:
+            return "EARNINGS_RUNNER"
+            
+        # Check Pullback
+        # Close near 20 EMA (within -4% to +0.8%) under low volume
+        if ema_aligned and (-4.0 <= dist_ema20 <= 0.8) and vol_ratio < 1.1:
+            return "PULLBACK"
+            
+        # Check Breakout
+        if ms_structure == "breakout" or (indic.get("volume_surge") and ms_structure == "uptrend"):
+            return "BREAKOUT"
+            
+        # Check Value Momentum
+        pe = fund.get("pe_ratio")
+        roe = fund.get("roe") or 0.0
+        if pe is not None and 0 < pe < 25 and roe > 0.15 and ema_aligned:
+            return "VALUE_MOMENTUM"
+            
+        # Check Momentum
+        if ema_aligned and rsi > 58:
+            return "MOMENTUM"
+            
+        return "MOMENTUM" if ema_aligned else "WATCHLIST_ONLY"
+    except Exception:
+        return "MOMENTUM"
 
 
 def check_daily_loss_limit(trade_history: list) -> Dict:

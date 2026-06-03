@@ -392,7 +392,7 @@ def fetch_market_indices() -> Dict[str, Optional[pd.DataFrame]]:
 
     result = {}
     for name, symbol in indices.items():
-        df = fetch_stock_history(symbol, period="1mo")
+        df = fetch_stock_history(symbol, period="1y")
         result[name] = df
         time.sleep(0.2)
 
@@ -462,6 +462,10 @@ def fetch_fundamentals(symbol: str) -> Dict:
         "fii_holding_pct": None,
         "has_recent_earnings": False,
         "earnings_surprise": None,
+        "quarterly_revs": [],
+        "quarterly_profits": [],
+        "quarterly_eps": [],
+        "quarterly_margins": [],
     }
 
     if is_blocked:
@@ -498,6 +502,10 @@ def fetch_fundamentals(symbol: str) -> Dict:
             "fii_holding_pct": None,
             "has_recent_earnings": False,
             "earnings_surprise": None,
+            "quarterly_revs": [],
+            "quarterly_profits": [],
+            "quarterly_eps": [],
+            "quarterly_margins": [],
         }
 
         # Convert debt_to_equity (yfinance gives it as %, divide by 100)
@@ -507,6 +515,28 @@ def fetch_fundamentals(symbol: str) -> Dict:
         # Skip slow yfinance earnings_dates call as it frequently hangs the morning scan
         fundamentals["has_recent_earnings"] = False
         fundamentals["earnings_surprise"] = None
+
+        # Fetch quarterly financials
+        try:
+            q_fin = ticker.quarterly_financials
+            if q_fin is not None and not q_fin.empty:
+                rev_row = q_fin.loc['Total Revenue'] if 'Total Revenue' in q_fin.index else None
+                net_inc_row = q_fin.loc['Net Income'] if 'Net Income' in q_fin.index else None
+                eps_row = q_fin.loc['Diluted EPS'] if 'Diluted EPS' in q_fin.index else (q_fin.loc['Basic EPS'] if 'Basic EPS' in q_fin.index else None)
+                
+                # yfinance columns are ordered descending by date (e.g. 2024-03-31, 2023-12-31...)
+                # Reverse to get chronological order (oldest to newest)
+                if rev_row is not None:
+                    fundamentals["quarterly_revs"] = [float(v) for v in rev_row.values[:4][::-1] if not pd.isna(v)]
+                if net_inc_row is not None:
+                    fundamentals["quarterly_profits"] = [float(v) for v in net_inc_row.values[:4][::-1] if not pd.isna(v)]
+                if eps_row is not None:
+                    fundamentals["quarterly_eps"] = [float(v) for v in eps_row.values[:4][::-1] if not pd.isna(v)]
+                if rev_row is not None and net_inc_row is not None:
+                    margins = net_inc_row / rev_row.replace(0, 1e-10)
+                    fundamentals["quarterly_margins"] = [float(v) for v in margins.values[:4][::-1] if not pd.isna(v)]
+        except Exception as q_err:
+            logger.debug(f"Quarterly financials fetch failed for {symbol}: {q_err}")
 
         # Save to cache
         _fundamentals_cache[symbol] = {
@@ -843,13 +873,13 @@ def fetch_news_signals(symbol: str) -> Dict:
 
         bullish_keywords = [
             "profit", "growth", "beat", "upgrade", "buy", "outperform",
-            "strong", "expansion", "order", "contract", "acquisition",
-            "quarterly results", "record", "high", "dividend", "bonus"
+            "expansion", "contract win", "acquisition",
+            "quarterly results", "dividend", "bonus", "rally"
         ]
         bearish_keywords = [
             "loss", "decline", "downgrade", "sell", "underperform",
             "weak", "fraud", "penalty", "fine", "investigation", "drop",
-            "miss", "debt", "default", "crisis", "layoff"
+            "miss", "debt", "default", "crisis", "layoff", "crash"
         ]
 
         bullish_count = 0
@@ -868,7 +898,7 @@ def fetch_news_signals(symbol: str) -> Dict:
             # Detect specific catalysts
             if any(kw in title for kw in ["earnings", "quarterly", "q1", "q2", "q3", "q4"]):
                 signals["catalysts"].append("Earnings Report")
-            if any(kw in title for kw in ["order", "contract", "deal"]):
+            if any(kw in title for kw in ["contract win", "deal signed"]):
                 signals["catalysts"].append("New Order/Contract")
             if any(kw in title for kw in ["acquisition", "merger", "takeover"]):
                 signals["catalysts"].append("M&A Activity")
@@ -878,10 +908,10 @@ def fetch_news_signals(symbol: str) -> Dict:
         signals["headlines"] = headlines[:5]
         signals["catalysts"] = list(set(signals["catalysts"]))  # dedup
 
-        # Determine overall sentiment
-        if bullish_count > bearish_count + 2:
+        # Determine overall sentiment (stricter threshold: need +3 gap)
+        if bullish_count > bearish_count + 3:
             signals["news_sentiment"] = "bullish"
-        elif bearish_count > bullish_count + 2:
+        elif bearish_count > bullish_count + 3:
             signals["news_sentiment"] = "bearish"
         else:
             signals["news_sentiment"] = "neutral"

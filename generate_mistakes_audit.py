@@ -8,6 +8,7 @@ Dispatched exclusively to harshkumawat9950@gmail.com (no CCs).
 
 import os
 import sys
+import io
 import json
 import logging
 from datetime import datetime, date
@@ -22,8 +23,269 @@ if sys.stdout.encoding != 'utf-8':
 logger = logging.getLogger(__name__)
 
 
+def analyze_factor_expectancy() -> tuple:
+    """
+    Loads all historical picks, filters for completed forward returns,
+    and calculates factor correlations, rolling diagnostics, setup win rates, and warnings.
+    Returns (warnings_html, html, suggestions_list)
+    """
+    import pandas as pd
+    import numpy as np
+    
+    db = db_manager.get_db()
+    records = []
+    
+    # 1. Load picks
+    if db is not None:
+        try:
+            col = db[config.MONGO_COLLECTION_PICKS]
+            records = list(col.find({}))
+        except Exception:
+            records = []
+            
+    # JSON fallback
+    if not records or db is None:
+        records = db_manager._read_json("daily_picks.json")
+        
+    if not records:
+        return "", "<p style='color:#64748b; font-style:italic;'>No picks records found for expectancy analysis.</p>", []
+        
+    flat_picks = []
+    for r in records:
+        picks_list = r.get("picks", r.get("top_picks", []))
+        for p in picks_list:
+            if p.get("future_5d_return") is not None or p.get("future_3d_return") is not None:
+                p_copy = dict(p)
+                p_copy["date"] = r.get("date")
+                flat_picks.append(p_copy)
+                
+    if not flat_picks:
+        return "", "<p style='color:#64748b; font-style:italic;'>No picks with completed forward returns available yet. Expectancy metrics will populate as trades mature (3+ trading days).</p>", []
+        
+    df = pd.DataFrame(flat_picks)
+    # Sort chronologically
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    
+    # Clean and parse factor columns
+    factor_cols = {
+        "rs_rank": "Relative Strength Score",
+        "structure_score": "Structure Score",
+        "technical_score": "Technical Score",
+        "institutional_score": "Institutional Score",
+        "fundamental_score": "Fundamental Score",
+        "earnings_score": "Earnings Score",
+        "sector_rank": "Sector Rank",
+        "opportunity_score": "Opportunity Score",
+        "expectancy_score": "Expectancy Score",
+        "liquidity_score": "Liquidity Score"
+    }
+    
+    for col in factor_cols.keys():
+        if col not in df.columns:
+            df[col] = np.nan
+        else:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+    return_cols = ["future_3d_return", "future_5d_return", "future_10d_return", "future_20d_return"]
+    for col in return_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+        else:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+    target_ret = "future_5d_return" if df["future_5d_return"].notna().sum() >= 5 else "future_3d_return"
+    valid_count = df[target_ret].notna().sum()
+    
+    # Calculate net returns by deducting round-trip transaction costs
+    slippage_pct = getattr(config, "SLIPPAGE_PCT", 0.0010)
+    brokerage_pct = getattr(config, "BROKERAGE_PCT", 0.0005)
+    txn_cost_pct = 2.0 * (slippage_pct + brokerage_pct) * 100.0
+    df["net_target_return"] = df[target_ret] - txn_cost_pct
+    
+    html = ""
+    warnings_html = ""
+    suggestions_list = []
+    
+    # ── 1. ROLLING PERFORMANCE DIAGNOSTICS & DRAWDOWN (last 30 trades) ──
+    if valid_count >= 5:
+        window_size = min(30, valid_count)
+        df["win"] = (df["net_target_return"] > 0).astype(int)
+        
+        rolling_wr = df["win"].rolling(window=window_size, min_periods=5).mean() * 100.0
+        rolling_ret = df["net_target_return"].rolling(window=window_size, min_periods=5).mean()
+        
+        # Compound growth of a mock 100 capital
+        equity_curve = (1.0 + df["net_target_return"] / 100.0).cumprod()
+        running_max = equity_curve.cummax()
+        drawdown = (equity_curve - running_max) / running_max
+        rolling_max_dd = drawdown.rolling(window=window_size, min_periods=5).min() * 100.0
+        
+        latest_wr = rolling_wr.iloc[-1]
+        latest_expectancy = rolling_ret.iloc[-1]
+        latest_max_dd = rolling_max_dd.iloc[-1]
+        
+        # Expectancy Warning Banner
+        if latest_expectancy < 0:
+            warnings_html += f"""
+            <div style='background-color:#fee2e2; border-left:4px solid #ef4444; padding:12px 16px; border-radius:8px; margin-bottom:16px; color:#991b1b;'>
+                <strong style='font-size:14px; display:block; margin-bottom:4px;'>⚠️ SYSTEM EXPECTANCY WARNING</strong>
+                <p style='margin:0; font-size:13px; line-height:1.4;'>Rolling {window_size}-trade net expectancy has dropped to <strong>{latest_expectancy:+.2f}%</strong>. The system is experiencing high failure rates or excessive transaction costs relative to profit margins. Consider tightening risk limits or scaling back position sizes.</p>
+            </div>
+            """
+            suggestions_list.append({
+                "topic": "Negative Expectancy Halt",
+                "suggestion": f"Halve position sizing immediately as rolling {window_size}-trade expectancy is negative ({latest_expectancy:.2f}%)."
+            })
+            
+        html += f"""
+        <div style='margin-top:20px; padding:16px; background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;'>
+            <h3 style='color:#0f172a; border-bottom:2px solid #cbd5e1; padding-bottom:6px; margin-top:0; font-size:15px;'>📈 Rolling Performance Diagnostics (Last {window_size} Trades)</h3>
+            <table style='width:100%; border-collapse:collapse; font-size:12px; text-align:left; margin-bottom:8px;'>
+                <tr style='background-color:#e2e8f0; color:#475569; font-weight:bold;'>
+                    <th style='padding:6px;'>Metric</th>
+                    <th style='padding:6px; text-align:right;'>Value</th>
+                </tr>
+                <tr style='border-bottom:1px solid #e2e8f0;'>
+                    <td style='padding:6px; font-weight:500;'>Rolling Win Rate</td>
+                    <td style='padding:6px; text-align:right; font-weight:bold;'>{latest_wr:.1f}%</td>
+                </tr>
+                <tr style='border-bottom:1px solid #e2e8f0;'>
+                    <td style='padding:6px; font-weight:500;'>Rolling Net Expectancy</td>
+                    <td style='padding:6px; text-align:right; font-weight:bold; color:{"#16a34a" if latest_expectancy >= 0 else "#dc2626"};'>{latest_expectancy:+.2f}%</td>
+                </tr>
+                <tr style='border-bottom:1px solid #e2e8f0;'>
+                    <td style='padding:6px; font-weight:500;'>Rolling Max Drawdown</td>
+                    <td style='padding:6px; text-align:right; font-weight:bold; color:#dc2626;'>{latest_max_dd:.2f}%</td>
+                </tr>
+            </table>
+        </div>
+        """
+        
+    # ── 2. ROLLING INFORMATION COEFFICIENT (IC) & DECAY ──
+    degraded_factors = []
+    ic_rows = ""
+    
+    if valid_count >= 5:
+        window_size = min(30, valid_count)
+        for col, label in factor_cols.items():
+            if df[col].notna().sum() >= 5:
+                rolling_ic = df[col].rolling(window=window_size, min_periods=5).corr(df["net_target_return"])
+                
+                # Check for decay: rolling IC < 0 for the last 3 consecutive steps
+                if len(rolling_ic) >= 3:
+                    last_3 = rolling_ic.tail(3).values
+                    if np.all(last_3 < 0.0):
+                        degraded_factors.append(label)
+                        suggestions_list.append({
+                            "topic": "Factor Decay Notification",
+                            "suggestion": f"Factor '{label}' Rolling IC has dropped below zero consistently over the last 3 evaluations. Recommend decreasing its allocation weight."
+                        })
+                
+                current_ic = rolling_ic.iloc[-1]
+                if not np.isnan(current_ic):
+                    color = "#16a34a" if current_ic > 0.05 else "#dc2626" if current_ic < -0.05 else "#475569"
+                    status = "🔴 DEGRADED" if label in degraded_factors else "🟢 Active"
+                    ic_rows += f"<tr style='border-bottom:1px solid #e2e8f0;'><td style='padding:6px; font-weight:500;'>{label}</td><td style='padding:6px; text-align:right; font-weight:bold; color:{color};'>{current_ic:+.2f}</td><td style='padding:6px; text-align:center;'>{status}</td></tr>"
+
+    if ic_rows:
+        html += f"""
+        <div style='margin-top:20px; padding:16px; background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;'>
+            <h3 style='color:#0f172a; border-bottom:2px solid #cbd5e1; padding-bottom:6px; margin-top:0; font-size:15px;'>📉 Factor Information Coefficient (Rolling {window_size}-Trade IC)</h3>
+            <table style='width:100%; border-collapse:collapse; font-size:12px; text-align:left;'>
+                <tr style='background-color:#e2e8f0; color:#475569; font-weight:bold;'>
+                    <th style='padding:6px;'>Factor Name</th>
+                    <th style='padding:6px; text-align:right;'>Rolling Correlation</th>
+                    <th style='padding:6px; text-align:center;'>Status</th>
+                </tr>
+                {ic_rows}
+            </table>
+        </div>
+        """
+        
+    # ── 3. FACTOR ORTHOGONALITY CHECK ──
+    ortho_warnings = ""
+    valid_factor_cols = [c for c in factor_cols.keys() if c in df.columns and df[c].notna().sum() >= 5]
+    if len(valid_factor_cols) >= 2:
+        corr_df = df[valid_factor_cols].corr()
+        high_corr_pairs = []
+        
+        for i, col1 in enumerate(corr_df.columns):
+            for j, col2 in enumerate(corr_df.columns):
+                if i < j:
+                    r_val = corr_df.loc[col1, col2]
+                    if not np.isnan(r_val) and abs(r_val) > 0.80:
+                        high_corr_pairs.append((factor_cols[col1], factor_cols[col2], r_val))
+                        
+        if high_corr_pairs:
+            ortho_warnings += "<ul style='margin:0; padding-left:20px; font-size:12px; color:#b45309;'>"
+            for f1, f2, r in high_corr_pairs:
+                ortho_warnings += f"<li><strong>{f1}</strong> & <strong>{f2}</strong> correlation is {r:+.2f}. High double-counting risk.</li>"
+            ortho_warnings += "</ul>"
+            
+            warnings_html += f"""
+            <div style='background-color:#fffbeb; border-left:4px solid #f59e0b; padding:12px 16px; border-radius:8px; margin-bottom:16px; color:#b45309;'>
+                <strong style='font-size:14px; display:block; margin-bottom:4px;'>⚠️ FACTOR ORTHOGONALITY ALERT</strong>
+                <p style='margin:0 0 8px 0; font-size:13px; line-height:1.4;'>High cross-correlation (>0.80) detected among active scoring factors. This indicates redundant information and overlap, artificially inflating setup scores:</p>
+                {ortho_warnings}
+            </div>
+            """
+        
+    # ── 4. STANDARD FACTOR EXPECTANCY TABLE (Historical pearson r) ──
+    html += "<div style='margin-top:20px; padding:16px; background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;'>"
+    html += "<h3 style='color:#0f172a; border-bottom:2px solid #cbd5e1; padding-bottom:6px; margin-top:0; font-size:15px;'>📊 Static Factor-Return Correlation</h3>"
+    
+    corrs = []
+    for col, label in factor_cols.items():
+        if df[col].notna().sum() >= 3:
+            r = df[col].corr(df["net_target_return"])
+            if not np.isnan(r):
+                corrs.append((label, r))
+                
+    corrs.sort(key=lambda x: abs(x[1]), reverse=True)
+    
+    if corrs:
+        html += f"<p style='margin:0 0 10px 0; font-size:13px; color:#475569;'><strong>Factor Correlation with {target_ret.replace('_', ' ').title()}</strong> (based on {valid_count} matured trades):</p>"
+        html += "<table style='width:100%; border-collapse:collapse; font-size:12px; text-align:left; margin-bottom:16px;'>"
+        html += "<tr style='background-color:#e2e8f0; color:#475569; font-weight:bold;'><th style='padding:6px;'>Factor Name</th><th style='padding:6px; text-align:right;'>Pearson r</th><th style='padding:6px;'>Predictive Class</th></tr>"
+        
+        for label, r in corrs:
+            power = "Strong Edge" if abs(r) >= 0.3 else "Moderate Edge" if abs(r) >= 0.15 else "Weak/Noise"
+            color = "#16a34a" if r > 0.05 else "#dc2626" if r < -0.05 else "#475569"
+            html += f"<tr style='border-bottom:1px solid #e2e8f0;'><td style='padding:6px; font-weight:500;'>{label}</td><td style='padding:6px; text-align:right; font-weight:bold; color:{color};'>{r:+.2f}</td><td style='padding:6px; color:#64748b;'>{power}</td></tr>"
+        html += "</table>"
+    else:
+        html += f"<p style='margin:0 0 10px 0; font-size:12px; color:#64748b; font-style:italic;'>Collecting more trade outcomes... (Need at least 3 completed trades to compute correlation. Active count: {valid_count})</p>"
+        
+    # Setup Expectancy (trade_type)
+    trade_type_col = "trade_type" if "trade_type" in df.columns else "setup_type" if "setup_type" in df.columns else None
+    if trade_type_col and df[trade_type_col].notna().sum() > 0:
+        html += "<p style='margin:12px 0 8px 0; font-size:13px; color:#475569;'><strong>Setup-Specific Expectancy:</strong></p>"
+        html += "<table style='width:100%; border-collapse:collapse; font-size:12px; text-align:left;'>"
+        html += "<tr style='background-color:#e2e8f0; color:#475569; font-weight:bold;'><th style='padding:6px;'>Setup</th><th style='padding:6px; text-align:center;'>Count</th><th style='padding:6px; text-align:right;'>Win Rate</th><th style='padding:6px; text-align:right;'>Avg 5d Return</th></tr>"
+        
+        groups = df.groupby(trade_type_col)
+        for name, group in groups:
+            n_trades = len(group)
+            valid_returns = group["net_target_return"].dropna()
+            if len(valid_returns) > 0:
+                wins = (valid_returns > 0).sum()
+                win_rate = (wins / len(valid_returns)) * 100.0
+                avg_ret = valid_returns.mean()
+                html += f"<tr style='border-bottom:1px solid #e2e8f0;'><td style='padding:6px; font-weight:bold;'>{name}</td><td style='padding:6px; text-align:center;'>{n_trades}</td><td style='padding:6px; text-align:right;'>{win_rate:.1f}%</td><td style='padding:6px; text-align:right; font-weight:bold; color:{'#16a34a' if avg_ret >=0 else '#dc2626'};'>{avg_ret:+.2f}%</td></tr>"
+        html += "</table>"
+        
+    html += "</div>"
+    return warnings_html, html, suggestions_list
+
+
 def run_mistakes_audit():
     logger.info("Starting STALKER Self-Correcting mistakes audit...")
+    try:
+        db_manager.update_past_picks_returns()
+    except Exception as e:
+        logger.error(f"Failed to update past picks returns: {e}")
+
     today = str(date.today())
 
     # Get EOD report data
@@ -80,6 +342,26 @@ def run_mistakes_audit():
             continue
 
         pnl_pct = ((close_p - open_p) / open_p) * 100.0
+        
+        # Trailing stop-loss for high-beta stocks:
+        # If beta > 1.2 and price rises by >= 2% from open, stop-loss trails to cost (open_p).
+        # Exits at cost if price hits low_p <= open_p or close_p < open_p.
+        hit_trailing_sl = False
+        try:
+            import data_fetcher
+            fund = data_fetcher.fetch_fundamentals(symbol)
+            beta = fund.get("beta")
+            is_high_beta = beta is not None and beta > 1.2
+            if is_high_beta and open_p and open_p > 0:
+                high_val = close_entry.get("high") or close_p
+                low_val = close_entry.get("low") or close_p
+                if high_val >= open_p * 1.02:
+                    if low_val <= open_p or close_p < open_p:
+                        hit_trailing_sl = True
+                        pnl_pct = 0.0
+        except Exception as fe:
+            logger.debug(f"Failed to evaluate trailing stop loss for {symbol}: {fe}")
+
         total_pnl += pnl_pct
         active_count += 1
         
@@ -91,7 +373,7 @@ def run_mistakes_audit():
         details = ""
 
         if action == "BUY":
-            if pnl_pct > 0:
+            if pnl_pct > 0 or hit_trailing_sl:
                 outcome = "HIT"
                 total_wins += 1
                 hits.append({
@@ -101,7 +383,7 @@ def run_mistakes_audit():
                     "open": open_p,
                     "close": close_p,
                     "alpha": alpha,
-                    "details": "Bullish target captured or closed in profit."
+                    "details": "Trailing stop loss protected capital at cost." if hit_trailing_sl else "Bullish target captured or closed in profit."
                 })
             else:
                 outcome = "MISTAKE"
@@ -193,12 +475,15 @@ def run_mistakes_audit():
             })
             break
 
-    # If no suggestions compiled, add general optimization advice
-    if not suggestions:
-        suggestions.append({
-            "topic": "Model Balance",
-            "suggestion": "The 7 scoring modules operated with high accuracy. No structural modifications required."
-        })
+    # Run factor expectancy analysis
+    warnings_html = ""
+    expectancy_html = ""
+    try:
+        warnings_html, expectancy_html, factor_suggestions = analyze_factor_expectancy()
+        suggestions.extend(factor_suggestions)
+    except Exception as e:
+        logger.error(f"Failed to run factor expectancy analysis: {e}")
+        expectancy_html = f"<p>Error in expectancy analysis: {e}</p>"
 
     # ── EMAIL DISPATCH ────────────────────────────────────────
     subject = f"🧠 STALKER Self-Correcting mistakes Audit & Reliability Strategy — {today}"
@@ -251,6 +536,7 @@ def run_mistakes_audit():
             
             <!-- Summary Stats -->
             <div style="padding:24px;">
+                {warnings_html}
                 <div style="display:flex;gap:15px;margin-bottom:24px;">
                     <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;">
                         <div style="font-size:10px;color:#64748b;font-weight:bold;text-transform:uppercase;margin-bottom:4px;">Audit Win Rate</div>
@@ -269,6 +555,9 @@ def run_mistakes_audit():
                 <!-- 1. Suggestions Box -->
                 <h3 style="color:#0f172a;border-bottom:2px solid #e2e8f0;padding-bottom:8px;margin-top:0;margin-bottom:14px;font-size:16px;">🛠️ Quantitative Recommendations for Reliability</h3>
                 {suggestions_html}
+
+                <!-- Expectancy Analysis Engine -->
+                {expectancy_html}
 
                 <!-- 2. Hits Table -->
                 {f'''

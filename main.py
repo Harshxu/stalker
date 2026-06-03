@@ -548,6 +548,23 @@ def generate_eod_report():
         pnl_pct = ((close_p - open_p) / open_p) * 100.0 if open_p else 0.0
         pnl_rupees = close_p - open_p
         
+        # Trailing stop-loss for high-beta stocks:
+        # If beta > 1.2 and price rises by >= 2% from open, stop-loss trails to cost (open_p).
+        # Exits at cost if price hits low_p <= open_p or close_p < open_p.
+        hit_trailing_sl = False
+        try:
+            fund = data_fetcher.fetch_fundamentals(symbol)
+            beta = fund.get("beta")
+            is_high_beta = beta is not None and beta > 1.2
+            if is_high_beta and open_p and open_p > 0:
+                if high_p >= open_p * 1.02:
+                    if low_p <= open_p or close_p < open_p:
+                        hit_trailing_sl = True
+                        pnl_pct = 0.0
+                        pnl_rupees = 0.0
+        except Exception as fe:
+            logger.debug(f"Failed to evaluate trailing stop loss for {symbol}: {fe}")
+        
         # 1. VWAP-based intraday trend
         vwap_trend = "BULLISH" if close_p > vwap else "BEARISH"
         
@@ -575,8 +592,12 @@ def generate_eod_report():
         if vol_ok:
             m_score += 2.5
             
-        result_str = "✅ Profit" if pnl_pct > 0 else "❌ Loss"
-        color = "green" if pnl_pct > 0 else "red"
+        if hit_trailing_sl:
+            result_str = "🟡 Trailing SL"
+            color = "yellow"
+        else:
+            result_str = "✅ Profit" if pnl_pct > 0 else "❌ Loss"
+            color = "green" if pnl_pct > 0 else "red"
         
         pnl_results.append({
             "symbol":       symbol,
@@ -771,6 +792,29 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
         date_str = str(date.today())
         ver      = verification or {}
 
+        # ── Verification Badge logic ─────────────────────────────────────
+        qual = ver.get("quality", "UNKNOWN")
+        if qual == "HIGH":
+            ver_badge = """<div style="display:inline-block;padding:6px 14px;background:#f0fdf4;
+                border-radius:9999px;font-size:12px;font-weight:bold;color:#16a34a;margin-bottom:16px;">
+                ✅ Entry Prices Verified & Locked
+                </div>"""
+        elif qual == "LOW":
+            ver_badge = """<div style="display:inline-block;padding:6px 14px;background:#fee2e2;
+                border-radius:9999px;font-size:12px;font-weight:bold;color:#dc2626;margin-bottom:16px;">
+                ⚠️ Price Verification Issues — treat entry prices as indicative
+                </div>"""
+        else:
+            ver_badge = ""  # verification not run yet
+
+        # ── Updated count note ────────────────────────────────────────────
+        if ver.get("updated", 0) > 0:
+            updated_note = f"""<div style="margin-top:8px;font-size:12px;color:#6b7280;">
+                💡 {ver['updated']} stock price(s) auto-corrected from 7AM scan values to latest live prices.
+                </div>"""
+        else:
+            updated_note = ""
+
         # ── SAFETY GUARD: Never send a blank picks email ──────────────────
         if not picks:
             logger.critical(
@@ -784,35 +828,33 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
             )
             return
 
-        # ── Verification badge HTML ───────────────────────────────────────
-        qual = ver.get("data_quality", "")
-        if qual == "HIGH":
-            ver_badge = f"""<div style="display:inline-block;padding:6px 14px;background:#dcfce7;
-                border-radius:9999px;font-size:12px;font-weight:bold;color:#16a34a;margin-bottom:16px;">
-                ✅ Price Data Verified — {ver.get('pass_rate',100)}% accuracy confirmed at {ver.get('verified_at','')[11:16]} IST
-                </div>"""
-        elif qual == "MEDIUM":
-            ver_badge = f"""<div style="display:inline-block;padding:6px 14px;background:#fef9c3;
-                border-radius:9999px;font-size:12px;font-weight:bold;color:#a16207;margin-bottom:16px;">
-                ⚠️ Price Data Partially Verified — {ver.get('pass_rate',0)}% accuracy
-                </div>"""
-        elif qual == "LOW":
-            ver_badge = """<div style=\"display:inline-block;padding:6px 14px;background:#fee2e2;
-                border-radius:9999px;font-size:12px;font-weight:bold;color:#dc2626;margin-bottom:16px;\">
-                ⚠️ Price Verification Issues — treat entry prices as indicative
-                </div>"""
+        # Check if there are any BUY picks in today's selection
+        has_buy_picks = any(p.get('action') == "BUY" for p in picks)
+        if not has_buy_picks:
+            subject = f"⚠️ STALKER Watchlist Only (No BUY) — {date_str} (Trend: {market})"
+            warning_banner = """
+                    <div style="background-color: #fee2e2; border-left: 6px solid #dc2626; padding: 16px; border-radius: 8px; margin-bottom: 24px; text-align: left;">
+                        <strong style="color: #dc2626; font-size: 15px; display: block; margin-bottom: 6px;">⚠️ CAPITAL PRESERVATION SHIELD ACTIVE</strong>
+                        <p style="margin: 0; font-size: 13px; color: #7f1d1d; line-height: 1.5;">
+                            No stocks met our strict high-probability <strong>BUY</strong> criteria today due to market conditions or high volatility. 
+                            All stocks listed below are strictly for monitoring (<strong>WATCH</strong>) only. 
+                            <strong>DO NOT enter any new trades today.</strong> Preserving capital is the best trade.
+                        </p>
+                    </div>
+            """
+            strategy_note = """
+                    <div style="margin-top: 30px; padding: 15px; background-color: #fef2f2; border-left: 4px solid #dc2626; border-radius: 4px; font-size: 13px; color: #991b1b; line-height: 1.5;">
+                        <strong>⚠️ Strategic Warning:</strong> No trades are recommended today as the market conditions or individual stock scores do not justify new entries. Do not take fresh positions. Keep your capital safe.
+                    </div>
+            """
         else:
-            ver_badge = ""  # verification not run yet
-
-        # ── Updated count note ────────────────────────────────────────────
-        if ver.get("updated", 0) > 0:
-            updated_note = f"""<div style="margin-top:8px;font-size:12px;color:#6b7280;">
-                💡 {ver['updated']} stock price(s) auto-corrected from 7AM scan values to latest live prices.
-                </div>"""
-        else:
-            updated_note = ""
-        
-        subject = f"🟢 STALKER Morning Picks — {date_str} (Trend: {market})"
+            subject = f"🟢 STALKER Morning Picks — {date_str} (Trend: {market})"
+            warning_banner = ""
+            strategy_note = """
+                    <div style="margin-top: 30px; padding: 15px; background-color: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 4px; font-size: 13px; color: #1e40af; line-height: 1.5;">
+                        <strong>💡 Trading Strategy Note:</strong> Entry is recommended at or near the opening price. Strictly follow the Stop Loss to manage capital risk. Let the targets execute automatically, or trail your Stop Loss in profit to capture maximum gains.
+                    </div>
+            """
         
         # Build premium HTML email body
         rows_html = ""
@@ -822,9 +864,15 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
             action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb" if action == "WATCH" else "#fef2f2"
             
             name = p.get('name', p.get('symbol', ''))
-            price = p.get('current_price') if p.get('current_price') is not None else 0
-            target = p.get('target_2') if p.get('target_2') is not None else 0
-            stop_loss = p.get('stop_loss') if p.get('stop_loss') is not None else 0
+            price = p.get('current_price')
+            price_str = f"₹{price:,.2f}" if price is not None and price > 0 else "—"
+            
+            target = p.get('target_2')
+            target_str = f"₹{target:,.2f}" if target is not None and target > 0 else "—"
+            
+            stop_loss = p.get('stop_loss')
+            stop_loss_str = f"₹{stop_loss:,.2f}" if stop_loss is not None and stop_loss > 0 else "—"
+            
             risk = p.get('risk_profile') if p.get('risk_profile') is not None else 'Medium'
             score = p.get('total_score') if p.get('total_score') is not None else 0
             
@@ -836,9 +884,9 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                         {action}
                     </span>
                 </td>
-                <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">₹{price:,.2f}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">₹{target:,.2f}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">₹{stop_loss:,.2f}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">{price_str}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">{target_str}</td>
+                <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">{stop_loss_str}</td>
                 <td style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
                 <td style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
             </tr>
@@ -866,10 +914,12 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                             <div style="font-size: 16px; font-weight: bold; color: #3b82f6;">{market}</div>
                         </div>
                     </div>
-
+ 
                     <!-- Verification Badge -->
                     <div style="text-align:center;">{ver_badge}{updated_note}</div>
-
+ 
+                    {warning_banner}
+ 
                     <!-- Table Title -->
                     <h3 style="margin: 0 0 12px 0; color: #1e3a8a; font-weight: 700; font-size: 18px;">🔥 Today's Top Picks</h3>
                     
@@ -892,9 +942,7 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                     </table>
                     
                     <!-- Note Section -->
-                    <div style="margin-top: 30px; padding: 15px; background-color: #eff6ff; border-left: 4px solid #3b82f6; border-radius: 4px; font-size: 13px; color: #1e40af; line-height: 1.5;">
-                        <strong>💡 Trading Strategy Note:</strong> Entry is recommended at or near the opening price. Strictly follow the Stop Loss to manage capital risk. Let the targets execute automatically, or trail your Stop Loss in profit to capture maximum gains.
-                    </div>
+                    {strategy_note}
                 </div>
                 
                 <!-- Footer -->
@@ -960,9 +1008,13 @@ def _print_picks_summary(result: Dict):
     print(f"{'='*60}")
     for i, p in enumerate(picks, 1):
         action_emoji = "🟢" if p["action"] == "BUY" else "🟡" if p["action"] == "WATCH" else "🔴"
+        sl = p.get('stop_loss')
+        sl_str = f"₹{sl:>8,.2f}" if sl is not None and sl > 0 else "     —  "
+        tgt = p.get('target_2')
+        tgt_str = f"₹{tgt:>8,.2f}" if tgt is not None and tgt > 0 else "     —  "
         print(f"  {i:2}. {action_emoji} {p['name']:<15} ₹{p['current_price']:>8,.2f}  "
-              f"Score:{p['total_score']:>5.1f}  SL:₹{p['stop_loss']:>8,.2f}  "
-              f"Target:₹{p['target_2']:>8,.2f}  [{p['risk_profile']}]")
+              f"Score:{p['total_score']:>5.1f}  SL:{sl_str}  "
+              f"Target:{tgt_str}  [{p['risk_profile']}]")
     print(f"\n  Open browser → http://localhost:{config.DASHBOARD_PORT}")
     print(f"{'='*60}\n")
 

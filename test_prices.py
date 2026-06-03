@@ -28,9 +28,9 @@ TEST_SYMBOLS = [
     "INFY.NS",
     "HINDALCO.NS",    # user reported wrong
     "SBIN.NS",
-    "ZOMATO.NS",
+    "ETERNAL.NS",
     "BAJFINANCE.NS",
-    "TATAMOTORS.NS",
+    "TMPV.NS",
     "WIPRO.NS",
 ]
 

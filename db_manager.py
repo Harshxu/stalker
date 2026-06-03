@@ -402,3 +402,302 @@ def delete_date_data(target_date: str, delete_picks: bool = False) -> bool:
                 
     return True
 
+
+def update_past_picks_returns():
+    """
+    Updates the multi-day forward returns (3d, 5d, 10d, 20d) for all picks in the last 30 days.
+    Calculates returns from the entry price (Open price on execution day) to the Close price on the Nth trading day.
+    """
+    import pandas as pd
+    from datetime import datetime, date, timedelta
+    import data_fetcher
+    import yfinance as yf
+    
+    logger.info("[TRACKER] Starting past picks return tracking...")
+    today_str = str(date.today())
+    
+    db = get_db()
+    records = []
+    
+    # 1. Load records from MongoDB or JSON
+    if db is not None:
+        try:
+            col = db[config.MONGO_COLLECTION_PICKS]
+            # Get picks from the last 35 days to allow for 20 trading days to pass
+            min_date = str(date.today() - timedelta(days=35))
+            records = list(col.find({"date": {"$gte": min_date}}))
+        except Exception as e:
+            logger.error(f"Failed to load picks from MongoDB for tracking: {e}")
+            records = []
+    
+    # JSON fallback
+    if not records or db is None:
+        records = _read_json("daily_picks.json")
+        min_date = str(date.today() - timedelta(days=35))
+        records = [r for r in records if r.get("date", "") >= min_date]
+        
+    if not records:
+        logger.info("[TRACKER] No recent picks found to track.")
+        return
+        
+    updated_records = []
+    
+    for record in records:
+        rec_date_str = record.get("date")
+        picks = record.get("picks", record.get("top_picks", []))
+        if not picks:
+            continue
+            
+        try:
+            rec_date = datetime.strptime(rec_date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        
+        # Load open prices for this date to get the true entry price
+        prices_for_day = get_prices_for_date(rec_date_str)
+        open_prices = prices_for_day.get("open", {})
+        
+        record_changed = False
+        
+        for pick in picks:
+            symbol = pick.get("symbol")
+            if not symbol:
+                continue
+                
+            needs_update = (
+                pick.get("future_3d_return") is None or
+                pick.get("future_5d_return") is None or
+                pick.get("future_10d_return") is None or
+                pick.get("future_20d_return") is None
+            )
+            
+            if not needs_update:
+                continue
+                
+            # Get entry price (Open price on date T)
+            open_q = open_prices.get(symbol, {})
+            entry_price = open_q.get("open") or open_q.get("current_price") or pick.get("current_price")
+            if not entry_price or entry_price <= 0:
+                continue
+                
+            # Fetch history for this symbol from T to today (approx 2 months to cover the period)
+            df_hist = data_fetcher.fetch_stock_history(symbol, period="6mo")
+            if df_hist is None or df_hist.empty:
+                continue
+                
+            # Filter history from T onwards
+            df_after = df_hist[df_hist.index.date >= rec_date]
+            if len(df_after) < 2:
+                continue
+                
+            # Row 0 of df_after is date T (the execution day).
+            # The close on day T + N is df_after['Close'].iloc[N] if len(df_after) > N.
+            lookbacks = {
+                3: "future_3d_return",
+                5: "future_5d_return",
+                10: "future_10d_return",
+                20: "future_20d_return"
+            }
+            
+            for offset, key in lookbacks.items():
+                if pick.get(key) is None:
+                    if len(df_after) > offset:
+                        close_at_offset = float(df_after['Close'].iloc[offset])
+                        ret = ((close_at_offset - entry_price) / entry_price) * 100.0
+                        pick[key] = round(ret, 2)
+                        record_changed = True
+                        logger.info(f"[TRACKER] Updated {symbol} {key} for {rec_date_str}: {ret:+.2f}%")
+                        
+        if record_changed:
+            updated_records.append(record)
+            
+    # Save updated records back
+    if updated_records:
+        if db is not None:
+            try:
+                col = db[config.MONGO_COLLECTION_PICKS]
+                for rec in updated_records:
+                    # Remove BSON ObjectId before update to prevent errors
+                    rec_copy = dict(rec)
+                    rec_copy.pop("_id", None)
+                    date_val = rec_copy.get("date")
+                    col.replace_one({"date": date_val}, rec_copy, upsert=True)
+                logger.info(f"[TRACKER] Saved {len(updated_records)} updated records to MongoDB.")
+            except Exception as e:
+                logger.error(f"Failed to save tracked returns to MongoDB: {e}")
+                
+        # Also write back to JSON
+        try:
+            all_picks = _read_json("daily_picks.json")
+            for rec in updated_records:
+                rec_copy = dict(rec)
+                rec_copy.pop("_id", None)
+                date_val = rec_copy.get("date")
+                all_picks = [p for p in all_picks if p.get("date") != date_val]
+                all_picks.append(rec_copy)
+            all_picks = all_picks[-90:] # Keep last 90 days
+            _write_json("daily_picks.json", all_picks)
+            logger.info(f"[TRACKER] Saved updated picks back to daily_picks.json fallback.")
+        except Exception as e:
+            logger.error(f"Failed to save tracked returns to JSON: {e}")
+
+
+def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: str = "Unknown", score: float = 75.0,
+                         volatility_regime: str = "normal", breadth_regime: str = "normal",
+                         liquidity_bucket: str = "medium", setup_subtype: str = "standard") -> dict:
+    """
+    Returns historical expectancy statistics for a setup type, grouped by regime and parameters.
+    Applies hierarchical fallback if sample sizes are small, and adjusts expectancy by sample confidence.
+    """
+    import numpy as np
+    from datetime import date, timedelta
+    
+    # Defaults
+    defaults = {
+        "PULLBACK": {"win_rate": 62.0, "avg_return": 3.1, "expectancy": 1.92, "std_dev": 1.5, "conf_width": 0.0, "source": "baseline"},
+        "BREAKOUT": {"win_rate": 48.0, "avg_return": 4.2, "expectancy": 2.02, "std_dev": 2.5, "conf_width": 0.0, "source": "baseline"},
+        "MOMENTUM": {"win_rate": 52.0, "avg_return": 2.8, "expectancy": 1.46, "std_dev": 1.8, "conf_width": 0.0, "source": "baseline"},
+        "VALUE_MOMENTUM": {"win_rate": 58.0, "avg_return": 3.5, "expectancy": 2.03, "std_dev": 2.0, "conf_width": 0.0, "source": "baseline"},
+        "EARNINGS_RUNNER": {"win_rate": 55.0, "avg_return": 4.0, "expectancy": 2.20, "std_dev": 2.2, "conf_width": 0.0, "source": "baseline"},
+        "WATCHLIST_ONLY": {"win_rate": 50.0, "avg_return": 0.0, "expectancy": 0.00, "std_dev": 1.0, "conf_width": 0.0, "source": "baseline"}
+    }
+    
+    # Determine score bucket
+    if score < 70.0:
+        score_bucket = "below_70"
+    elif score < 80.0:
+        score_bucket = "70-80"
+    elif score < 90.0:
+        score_bucket = "80-90"
+    else:
+        score_bucket = "90+"
+
+    # Load recent picks
+    db = get_db()
+    records = []
+    min_date = str(date.today() - timedelta(days=90))
+    if db is not None:
+        try:
+            col = db[config.MONGO_COLLECTION_PICKS]
+            records = list(col.find({"date": {"$gte": min_date}}))
+        except Exception:
+            records = []
+            
+    if not records or db is None:
+        records = _read_json("daily_picks.json")
+        records = [r for r in records if r.get("date", "") >= min_date]
+        
+    flat_picks = []
+    # Round-trip transaction cost assumption (brokerage + slippage at entry & exit)
+    slippage_pct = getattr(config, "SLIPPAGE_PCT", 0.0010)
+    brokerage_pct = getattr(config, "BROKERAGE_PCT", 0.0005)
+    txn_cost_pct = 2.0 * (slippage_pct + brokerage_pct) * 100.0  # converted to %
+    
+    for r in records:
+        picks_list = r.get("picks", r.get("top_picks", []))
+        parent_regime = r.get("market_trend", "neutral").capitalize()
+        for p in picks_list:
+            raw_ret = p.get("future_5d_return") if p.get("future_5d_return") is not None else p.get("future_3d_return")
+            if raw_ret is not None:
+                net_ret = float(raw_ret) - txn_cost_pct
+                p_score = p.get("total_score") or p.get("alpha_score") or 75.0
+                if p_score < 70.0:
+                    p_bucket = "below_70"
+                elif p_score < 80.0:
+                    p_bucket = "70-80"
+                elif p_score < 90.0:
+                    p_bucket = "80-90"
+                else:
+                    p_bucket = "90+"
+                
+                flat_picks.append({
+                    "trade_type": p.get("trade_type"),
+                    "market_regime": parent_regime,
+                    "sector": p.get("sector"),
+                    "score_bucket": p_bucket,
+                    "volatility_regime": p.get("volatility_regime", "normal"),
+                    "breadth_regime": p.get("breadth_regime", "normal"),
+                    "liquidity_bucket": p.get("liquidity_bucket", "medium"),
+                    "setup_subtype": p.get("setup_subtype", "standard"),
+                    "net_return": net_ret
+                })
+                
+    # Hierarchical filtering fallback
+    matches = []
+    source_level = "baseline"
+    
+    if flat_picks:
+        # Level 1: Full Exact Match
+        matches = [p for p in flat_picks if 
+                   p["trade_type"] == setup_name and 
+                   p["market_regime"] == market_regime.capitalize() and 
+                   p["sector"] == sector and 
+                   p["score_bucket"] == score_bucket and
+                   p["volatility_regime"] == volatility_regime and
+                   p["breadth_regime"] == breadth_regime and
+                   p["liquidity_bucket"] == liquidity_bucket and
+                   p["setup_subtype"] == setup_subtype]
+        source_level = "exact"
+        
+        # Level 2: Setup + Regimes + Subtype Match
+        if len(matches) < 5:
+            matches = [p for p in flat_picks if 
+                       p["trade_type"] == setup_name and 
+                       p["market_regime"] == market_regime.capitalize() and
+                       p["volatility_regime"] == volatility_regime and
+                       p["breadth_regime"] == breadth_regime and
+                       p["setup_subtype"] == setup_subtype]
+            source_level = "setup_regimes_subtype"
+            
+        # Level 3: Setup + Regime + Volatility Match
+        if len(matches) < 5:
+            matches = [p for p in flat_picks if 
+                       p["trade_type"] == setup_name and 
+                       p["market_regime"] == market_regime.capitalize() and
+                       p["volatility_regime"] == volatility_regime]
+            source_level = "setup_regime_vol"
+            
+        # Level 4: Setup + Regime Match
+        if len(matches) < 5:
+            matches = [p for p in flat_picks if 
+                       p["trade_type"] == setup_name and 
+                       p["market_regime"] == market_regime.capitalize()]
+            source_level = "setup_regime"
+            
+        # Level 5: Setup only Match
+        if len(matches) < 5:
+            matches = [p for p in flat_picks if p["trade_type"] == setup_name]
+            source_level = "setup"
+
+    # Compute live stats if minimum sample size met
+    if len(matches) >= 5:
+        returns = [m["net_return"] for m in matches]
+        wins = sum(1 for r in returns if r > 0)
+        win_rate = (wins / len(returns)) * 100.0
+        avg_return = sum(returns) / len(returns)
+        std_dev = float(np.std(returns)) if len(returns) > 1 else 0.0
+        
+        # 95% Confidence Interval (Margin of Error)
+        conf_width = 1.96 * (std_dev / np.sqrt(len(returns)))
+        
+        raw_expectancy = (win_rate / 100.0) * avg_return
+        # Down-weight expectancy for low sample sizes (n < 30)
+        confidence_factor = min(1.0, len(returns) / 30.0)
+        expectancy = raw_expectancy * confidence_factor
+        
+        return {
+            "win_rate": round(win_rate, 1),
+            "avg_return": round(avg_return, 2),
+            "expectancy": round(expectancy, 2),
+            "std_dev": round(std_dev, 2),
+            "conf_width": round(conf_width, 2),
+            "sample_size": len(returns),
+            "source": f"live_{source_level}"
+        }
+        
+    # Default fallback
+    res = dict(defaults.get(setup_name, defaults["MOMENTUM"]))
+    res["sample_size"] = len(matches)
+    res["source"] = "baseline"
+    return res
+

@@ -29,12 +29,12 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 def calculate_vwap(df: pd.DataFrame) -> pd.Series:
     """
     Volume Weighted Average Price.
-    VWAP = cumsum(typical_price * volume) / cumsum(volume)
-    Resets daily.
+    For daily candles: each row is one full day, so VWAP per day = typical price of that bar.
+    For intraday candles: proper cumulative VWAP with daily reset would be needed.
+    Since we use daily data (1d interval), typical price IS the correct daily VWAP.
     """
     typical_price = (df["High"] + df["Low"] + df["Close"]) / 3
-    vwap = (typical_price * df["Volume"]).cumsum() / df["Volume"].cumsum()
-    return vwap
+    return typical_price
 
 
 def calculate_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
@@ -74,6 +74,34 @@ def calculate_bollinger_bands(series: pd.Series, period: int = 20, std_dev: floa
     upper  = middle + std_dev * std
     lower  = middle - std_dev * std
     return upper, middle, lower
+
+
+def calculate_cmf(df: pd.DataFrame, period: int = 20) -> pd.Series:
+    """
+    Chaikin Money Flow (CMF) measures institutional accumulation/distribution.
+    CMF = Sum(MF Volume, N) / Sum(Volume, N)
+    MF Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    MF Volume = MF Multiplier * Volume
+    """
+    try:
+        high = df["High"]
+        low = df["Low"]
+        close = df["Close"]
+        volume = df["Volume"]
+        
+        hl_range = high - low
+        # Avoid division by zero
+        hl_range = hl_range.replace(0, 1e-10)
+        
+        mf_multiplier = ((close - low) - (high - close)) / hl_range
+        mf_volume = mf_multiplier * volume
+        
+        sum_mf_volume = mf_volume.rolling(window=period).sum()
+        sum_volume = volume.rolling(window=period).sum().replace(0, 1e-10)
+        
+        return sum_mf_volume / sum_volume
+    except Exception:
+        return pd.Series(0.0, index=df.index)
 
 
 def volume_surge_ratio(df: pd.DataFrame, lookback: int = 20) -> float:
@@ -154,6 +182,37 @@ def relative_strength_vs_nifty(stock_df: pd.DataFrame, nifty_df: pd.DataFrame, p
         return 0.0
 
 
+def calculate_multi_horizon_rs(stock_df: pd.DataFrame, nifty_df: pd.DataFrame) -> float:
+    """
+    Multi-Horizon Relative Strength:
+    Combines 20-day (25%), 60-day (35%), and 120-day (40%) returns vs Nifty.
+    """
+    try:
+        rs_20 = relative_strength_vs_nifty(stock_df, nifty_df, period=20)
+        rs_60 = relative_strength_vs_nifty(stock_df, nifty_df, period=60) if len(stock_df) >= 60 and len(nifty_df) >= 60 else rs_20
+        rs_120 = relative_strength_vs_nifty(stock_df, nifty_df, period=120) if len(stock_df) >= 120 and len(nifty_df) >= 120 else rs_60
+        
+        return float(0.25 * rs_20 + 0.35 * rs_60 + 0.40 * rs_120)
+    except Exception:
+        return 0.0
+
+
+def calculate_atr_slope(atr_series: pd.Series, period: int = 10) -> float:
+    """
+    Calculates the slope of the ATR over a lookback window to check volatility contraction.
+    Negative slope indicates volatility contraction.
+    """
+    try:
+        if len(atr_series) < period:
+            return 0.0
+        y = atr_series.tail(period).values
+        x = np.arange(len(y))
+        slope, _ = np.polyfit(x, y, 1)
+        return float(slope)
+    except Exception:
+        return 0.0
+
+
 def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = None) -> dict:
     """
     Master function: compute all indicators for a stock DataFrame.
@@ -197,10 +256,10 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     ohl_signal    = check_ohl_pattern(df)
     dist_52w_high = price_vs_52w(df)
 
-    # Relative strength
+    # Relative strength (Multi-Horizon)
     rs_vs_nifty = 0.0
     if nifty_df is not None:
-        rs_vs_nifty = relative_strength_vs_nifty(df, nifty_df)
+        rs_vs_nifty = calculate_multi_horizon_rs(df, nifty_df)
 
     # Key boolean signals
     above_vwap       = latest_close > latest_vwap * (1 - config.VWAP_TOLERANCE)
@@ -218,6 +277,17 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     bb_width = float(bb_upper.iloc[-1] - bb_lower.iloc[-1])
     bb_avg_width = float((bb_upper - bb_lower).rolling(20).mean().iloc[-1]) if len(df) >= 20 else bb_width
     bb_squeeze = bb_width < bb_avg_width * 0.7 if bb_avg_width > 0 else False
+    bb_width_ratio = bb_width / bb_avg_width if bb_avg_width > 0 else 1.0
+
+    # ATR Slope
+    atr_slope = calculate_atr_slope(atr, period=10)
+
+    # CMF
+    cmf_series = calculate_cmf(df)
+    latest_cmf = float(cmf_series.iloc[-1]) if not cmf_series.empty else 0.0
+
+    # Pullback distance from 20 EMA
+    dist_from_ema20 = float((latest_close - latest_ema20) / latest_ema20 * 100.0) if latest_ema20 else 0.0
 
     return {
         # Raw values
@@ -227,6 +297,7 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
         "rsi":            latest_rsi,
         "vwap":           latest_vwap,
         "atr":            latest_atr,
+        "atr_slope":      atr_slope,
         "volume":         latest_volume,
         "volume_ratio":   vol_ratio,
         "gap_pct":        gap_pct,
@@ -237,6 +308,9 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
         "macd_hist":      float(macd_hist.iloc[-1]),
         "bb_upper":       float(bb_upper.iloc[-1]),
         "bb_lower":       float(bb_lower.iloc[-1]),
+        "bb_width_ratio": bb_width_ratio,
+        "cmf":            latest_cmf,
+        "dist_from_ema20": dist_from_ema20,
 
         # Boolean signals
         "above_vwap":     above_vwap,
