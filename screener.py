@@ -955,7 +955,8 @@ def run_screen(symbols: Optional[List[str]] = None,
                 },
                 "df_hist":            df_hist,
                 "indic":              indic,
-                "ms":                 ms
+                "ms":                 ms,
+                "fund":               fund
             })
             
         except Exception as e:
@@ -1053,13 +1054,11 @@ def run_screen(symbols: Optional[List[str]] = None,
     proposed_dfs = []
     
     for stock in candidates:
-        if stock["action"] != "BUY":
-            continue
-            
         symbol = stock["symbol"]
         sector = stock["sector"]
         industry = stock["fund"].get("industry", "Unknown")
         df_hist = stock["df_hist"]
+        action = stock["action"]
         
         # 1. Sector Concentration Limit check (Max 2 stocks per sector)
         s_count = sector_counts.get(sector, 0)
@@ -1071,10 +1070,11 @@ def run_screen(symbols: Optional[List[str]] = None,
         if ind_count >= 1:
             continue
             
-        # 3. Portfolio Heat Control
-        if active_heat + risk_per_trade_pct > heat_limit:
-            print(f"   Skipping {symbol}: Heat limit exceeded ({active_heat + risk_per_trade_pct:.1f}% > {heat_limit:.1f}%)")
-            continue
+        # 3. Portfolio Heat Control (only for BUY picks)
+        if action == "BUY":
+            if active_heat + risk_per_trade_pct > heat_limit:
+                print(f"   Skipping {symbol}: Heat limit exceeded ({active_heat + risk_per_trade_pct:.1f}% > {heat_limit:.1f}%)")
+                continue
             
         # 4. Pearson Correlation Gating
         temp_dfs = proposed_dfs + [df_hist]
@@ -1099,17 +1099,20 @@ def run_screen(symbols: Optional[List[str]] = None,
         proposed_dfs.append(df_hist)
         sector_counts[sector] = s_count + 1
         industry_counts[industry] = ind_count + 1
-        active_heat += risk_per_trade_pct
+        if action == "BUY":
+            active_heat += risk_per_trade_pct
         
         if len(portfolio) >= top_n:
             break
 
-    # Clean up DF before return to avoid serialisation issues
+    # Clean up DF and fund before return to avoid serialisation issues
     for item in portfolio:
         item.pop("df_hist", None)
+        item.pop("fund", None)
         
     for item in candidates:
         item.pop("df_hist", None)
+        item.pop("fund", None)
         
     # Apply formal sequential numbering to active Rank
     for rank_idx, item in enumerate(portfolio, 1):
