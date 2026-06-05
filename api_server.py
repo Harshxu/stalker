@@ -896,7 +896,10 @@ def start_server(port: int = config.DASHBOARD_PORT, open_browser: bool = True):
             
             def _run_scheduler_loop():
                 while True:
-                    schedule.run_pending()
+                    try:
+                        schedule.run_pending()
+                    except Exception as loop_err:
+                        logger.error(f"[SCHEDULER LOOP] Unhandled error in schedule.run_pending(): {loop_err}", exc_info=True)
                     time.sleep(30)
                     
             threading.Thread(target=_run_scheduler_loop, daemon=True).start()

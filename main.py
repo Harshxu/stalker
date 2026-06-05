@@ -45,6 +45,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
+# Scheduler Task Wrapper (Handles Errors & Automatic Retries)
+# ─────────────────────────────────────────────
+def safe_scheduler_task(max_retries=3, delay_sec=60):
+    """
+    Decorator to wrap scheduled tasks. 
+    Catches exceptions, logs them, and retries the task up to max_retries.
+    Prevents unhandled exceptions from crashing the main scheduler thread.
+    """
+    def decorator(func):
+        import functools
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"[SCHEDULER] Starting task: {func.__name__} (Attempt {attempt}/{max_retries})")
+                    res = func(*args, **kwargs)
+                    logger.info(f"[SCHEDULER] Task {func.__name__} completed successfully on attempt {attempt}.")
+                    return res
+                except Exception as e:
+                    last_error = e
+                    logger.error(
+                        f"[SCHEDULER] Task {func.__name__} failed on attempt {attempt}/{max_retries} with error: {e}",
+                        exc_info=True
+                    )
+                    if attempt < max_retries:
+                        logger.info(f"[SCHEDULER] Waiting {delay_sec} seconds before retrying...")
+                        time.sleep(delay_sec)
+            
+            # If we reach here, all retries failed
+            logger.critical(f"[SCHEDULER] Task {func.__name__} failed permanently after {max_retries} attempts.")
+            # Send admin alert for critical failures
+            try:
+                _send_admin_alert(
+                    f"Job Failed: {func.__name__}",
+                    f"Task failed permanently after {max_retries} attempts. Last error: {last_error}"
+                )
+            except Exception as alert_err:
+                logger.error(f"[SCHEDULER] Failed to send admin alert: {alert_err}")
+            return None
+        return wrapper
+    return decorator
+
+
+# ─────────────────────────────────────────────
 # STATE: Today's picks (shared between functions)
 # ─────────────────────────────────────────────
 _today_scan_result: Dict = {}
@@ -55,6 +100,7 @@ _today_symbols_picked = []
 # TASK 0: PRE-MARKET DEEP ANALYSIS (7:00 AM)
 # ═══════════════════════════════════════════════
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def run_premarket_analysis():
     """Run full market analysis at 7 AM so picks are ready before market opens."""
     global _today_scan_result, _today_symbols_picked
@@ -97,6 +143,7 @@ def run_premarket_analysis():
 
     except Exception as e:
         logger.error(f"Pre-market analysis failed: {e}", exc_info=True)
+        raise
 
 
 # ═══════════════════════════════════════════════
@@ -106,6 +153,7 @@ def run_premarket_analysis():
 # Stores the last verification report for the morning email
 _verification_report: Dict = {}
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def verify_picks_prices():
     """
     Run at 8:15 AM — 15 minutes before the morning email.
@@ -290,6 +338,7 @@ def verify_picks_prices():
     logger.info("=" * 55)
 
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def run_morning_scan():
     """Send the morning email at 8:30 AM using pre-computed picks from 7 AM analysis."""
     global _today_scan_result, _today_symbols_picked
@@ -355,14 +404,8 @@ def run_morning_scan():
                     json.dump(result, f, indent=2, default=str)
                 _print_picks_summary(result)
             except Exception as scan_err:
-                logger.critical(f"Emergency scan also failed: {scan_err}. Aborting email — alerting admin.")
-                _send_admin_alert(
-                    "Pre-Market Analysis Completely Failed",
-                    f"Emergency scan error: {scan_err}. "
-                    "The 7:00 AM pre-market job did NOT run (scheduler may have been stopped or run in --mode serve). "
-                    "No picks email was sent to users. Please restart: python main.py --mode run"
-                )
-                return
+                logger.critical(f"Emergency scan also failed: {scan_err}. Aborting email.")
+                raise
         else:
             logger.info(f"Using pre-market picks: {len(_today_symbols_picked)} stocks ready")
 
@@ -374,19 +417,14 @@ def run_morning_scan():
 
     except Exception as e:
         logger.error(f"Morning email dispatch failed: {e}", exc_info=True)
-        try:
-            _send_admin_alert(
-                "Morning Email Dispatch Crashed",
-                f"Unhandled exception: {e}"
-            )
-        except Exception:
-            pass
+        raise
 
 
 # ═══════════════════════════════════════════════
 # TASK 2: RECORD OPEN PRICES (9:20 AM)
 # ═══════════════════════════════════════════════
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def record_open_prices():
     global _today_symbols_picked
 
@@ -408,6 +446,8 @@ def record_open_prices():
     logger.info(f"Recording open prices for {len(_today_symbols_picked)} stocks...")
     prices = data_fetcher.fetch_open_prices(_today_symbols_picked, allow_historical=IS_TEST_MODE)
     if not prices:
+        if not is_nse_holiday(date.today()) or IS_TEST_MODE:
+            raise RuntimeError("Failed to fetch open prices for any stock. Triggering retry.")
         logger.info("No open prices retrieved (Market is closed today).")
         return
 
@@ -425,6 +465,7 @@ def record_open_prices():
 # TASK 3: RECORD CLOSE PRICES (3:35 PM)
 # ═══════════════════════════════════════════════
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def record_close_prices():
     global _today_symbols_picked
 
@@ -445,6 +486,8 @@ def record_close_prices():
     logger.info(f"Recording close prices for {len(_today_symbols_picked)} stocks...")
     prices = data_fetcher.fetch_close_prices(_today_symbols_picked, allow_historical=IS_TEST_MODE)
     if not prices:
+        if not is_nse_holiday(date.today()) or IS_TEST_MODE:
+            raise RuntimeError("Failed to fetch close prices for any stock. Triggering retry.")
         logger.info("No close prices retrieved (Market is closed today).")
         return
 
@@ -461,6 +504,7 @@ def record_close_prices():
 # TASK 4: EOD REPORT & EMAIL (4:00 PM)
 # ═══════════════════════════════════════════════
 
+@safe_scheduler_task(max_retries=3, delay_sec=60)
 def generate_eod_report():
     logger.info("Generating EOD report with STALKER Alpha Engine v3.0 Audit Engine...")
 
@@ -625,6 +669,12 @@ def generate_eod_report():
             "target":       pick.get("target_2"),
             "stop_loss":    pick.get("stop_loss"),
         })
+
+    if not pnl_results:
+        if not is_nse_holiday(date.today()) or IS_TEST_MODE:
+            raise RuntimeError("Failed to fetch EOD closing data for any picks. Triggering retry.")
+        logger.warning("No picks data for EOD report")
+        return
 
     # 6. Market Breadth calculations
     pct_above_open = (sum(1 for p in pnl_results if p["pnl_pct"] > 0) / len(pnl_results) * 100.0) if pnl_results else 0.0
@@ -957,9 +1007,12 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
         </html>
         """
         
-        _send_via_brevo(subject, html_body)
+        sent = _send_via_brevo(subject, html_body)
+        if not sent:
+            raise RuntimeError("Failed to send morning email via Brevo.")
     except Exception as e:
         logger.error(f"Morning email failed to build: {e}")
+        raise
 
 
 def _send_market_closed_email():
@@ -1221,9 +1274,12 @@ def _send_email_report(eod_data: Dict):
         </html>
         """
         
-        _send_via_brevo(subject, html_body)
+        sent = _send_via_brevo(subject, html_body)
+        if not sent:
+            raise RuntimeError("Failed to send EOD email via Brevo.")
     except Exception as e:
         logger.error(f"EOD email failed to build: {e}")
+        raise
 
 
 # ─────────────────────────────────────────────
