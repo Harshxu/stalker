@@ -56,7 +56,7 @@ def compute_growth_trend_metric(y: List[float]) -> float:
 def score_fundamentals(fund: Dict, roe_rank: float = 50.0, profit_growth_rank: float = 50.0,
                        revenue_growth_rank: float = 50.0, sales_growth_rank: float = 50.0,
                        earnings_revision_rank: float = 50.0, margin_expansion_rank: float = 50.0,
-                       roe_trend_rank: float = 50.0) -> Dict:
+                       roe_trend_rank: float = 50.0, fcf_growth_rank: float = 50.0) -> Dict:
     """
     Score a company's fundamentals out of 10 using continuous percentile ranks.
     Combines Static Health (70%) and dynamic trend regression (30%).
@@ -88,8 +88,8 @@ def score_fundamentals(fund: Dict, roe_rank: float = 50.0, profit_growth_rank: f
     static_score = (static_avg / 100.0) * 7.0
 
     # ── Dynamic Trend Score (Max 3.0) ──────────────────
-    # Average of sales_growth_rank, margin_expansion_rank, earnings_revision_rank, and roe_trend_rank
-    trend_avg = (sales_growth_rank + margin_expansion_rank + earnings_revision_rank + roe_trend_rank) / 4.0
+    # Average of sales_growth, margin_expansion, earnings_revision, roe_trend, and fcf_growth
+    trend_avg = (sales_growth_rank + margin_expansion_rank + earnings_revision_rank + roe_trend_rank + fcf_growth_rank) / 5.0
     trend_score = (trend_avg / 100.0) * 3.0
 
     # ── Leverage Debt Penalty ─────────────────────────

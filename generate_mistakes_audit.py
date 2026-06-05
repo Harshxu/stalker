@@ -16,9 +16,12 @@ import config
 import db_manager
 import main
 
-# Force UTF-8 output
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    pass  # In-process / thread context — stdout already safe
 
 logger = logging.getLogger(__name__)
 

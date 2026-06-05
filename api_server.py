@@ -361,20 +361,60 @@ _scan_lock = threading.Lock()
 _is_scanning = False
 
 def _run_background_scan_task():
-    """Background thread: run pre-market analysis (scan + save to DB, no email)."""
+    """Background thread: run pre-market analysis (scan + save to DB, no email).
+    
+    IMPORTANT: This runs in a daemon thread. sys.stdout may be the server's
+    closed stream. We redirect all print() output to the logger to prevent
+    'I/O operation on closed file' errors from screener.py's print() calls.
+    """
     global _is_scanning
     logger.info("Auto-triggering background pre-market analysis...")
+
+    # Redirect sys.stdout to a logger-backed stream for the duration of this thread.
+    # This prevents screener.py / main.py print() calls from hitting the
+    # server's potentially-closed stdout buffer.
+    class _LoggerWriter:
+        """Forwards write() calls to logging.info, stripping empty lines."""
+        def __init__(self, log):
+            self._log = log
+            self._buf = ""
+
+        def write(self, msg):
+            self._buf += msg
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                line = line.strip()
+                if line:
+                    self._log.info(line)
+
+        def flush(self):
+            if self._buf.strip():
+                self._log.info(self._buf.strip())
+            self._buf = ""
+
+        def fileno(self):
+            raise OSError("LoggerWriter has no file descriptor")
+
+    _thread_logger = logging.getLogger("stalker.background_scan")
+    _safe_stdout = _LoggerWriter(_thread_logger)
+
+    original_stdout = sys.stdout
     try:
-        import main
-        # Use run_premarket_analysis (scan + DB save only)
-        # run_morning_scan is NOT called here — the scheduler handles the email at 8:30 AM
-        main.run_premarket_analysis()
-        logger.info("Background pre-market analysis completed successfully")
+        sys.stdout = _safe_stdout
+        import main as _main
+        _main.run_premarket_analysis()
+        logger.info("Background pre-market analysis completed successfully.")
     except Exception as e:
         logger.error(f"Auto background scan failed: {e}", exc_info=True)
     finally:
+        # Always restore original stdout
+        try:
+            sys.stdout = original_stdout
+        except Exception:
+            pass
         with _scan_lock:
             _is_scanning = False
+
 
 
 def api_picks() -> Dict:

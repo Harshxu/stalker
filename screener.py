@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-STALKER - Stock Market Screener & Alpha Engine v3.0 (Production Quant)
-Scans the stock universe, executes strict safety gates, runs 7 weighted alpha scoring models,
-and constructs a risk-diversified top conviction portfolio today.
+STALKER - Orchestrator v5.0 (Phase 1 Elite Architecture)
+Clean separation of concerns across 6 independent layers:
+  Stage 1: Safety Filters (hard gates)
+  Stage 2: Regime Engine (8 adaptive states)
+  Stage 3: Ensemble Alpha Engine (4 sub-models) + Meta Model
+  Stage 4: Reality Check (execution friction)
+  Stage 5: Risk Engine (drawdown-aware sizing)
+  Stage 6: Portfolio Engine (correlation + concentration)
 """
 
 import sys
@@ -23,10 +28,20 @@ import market_structure as ms_module
 import fundamentals as fund_module
 import risk_manager as rm
 import db_manager
+import regime_engine as re_module
+import alpha_engine as ae_module
+import meta_model as mm_module
+import reality_check as rc_module
+import market_pulse as pulse_module
+from portfolio_engine import PortfolioEngine
 
-# Force UTF-8 output on Windows to handle special chars
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
+try:
+    if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+        import io as _io
+        sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+except Exception:
+    pass  # In-process / thread context — stdout already safe
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +276,7 @@ def calculate_institutional_score(volume_rank: float, cmf_rank: float) -> float:
 
 
 def calculate_sector_score(sector: str, sector_trends: Dict) -> float:
-    """Returns Sector Momentum score (100 for bullish, 70 sideways, 20 bearish)"""
+    """Returns Sector Momentum score mapped to 0-100 based on Sector RS"""
     # Normalize sector names to match index trends
     norm_sector = sector
     sector_lower = sector.lower()
@@ -280,24 +295,21 @@ def calculate_sector_score(sector: str, sector_trends: Dict) -> float:
     elif "metal" in sector_lower or "basic materials" in sector_lower or "steel" in sector_lower or "mining" in sector_lower:
         norm_sector = "Metal"
 
-    trend = sector_trends.get(norm_sector, "unknown")
-    if trend == "bullish":
-        return 100.0
-    elif trend == "sideways":
-        return 70.0
-    elif trend == "bearish":
-        return 20.0
-    return 50.0
+    # Convert Sector RS (e.g. +5%) to a 0-100 score
+    rs = float(sector_trends.get(norm_sector, 0.0))
+    score = 50.0 + (rs * 10.0)
+    return float(max(0.0, min(100.0, score)))
 
 
 def calculate_fundamental_score(fund: Dict, roe_rank: float = 50.0, profit_growth_rank: float = 50.0,
                                 revenue_growth_rank: float = 50.0, sales_growth_rank: float = 50.0,
                                 earnings_revision_rank: float = 50.0, margin_expansion_rank: float = 50.0,
-                                roe_trend_rank: float = 50.0) -> float:
+                                roe_trend_rank: float = 50.0, fcf_growth_rank: float = 50.0) -> float:
     """Scores fundamentals using continuous percentile ranks and regression-based growth trends."""
     res = fund_module.score_fundamentals(fund, roe_rank, profit_growth_rank, revenue_growth_rank,
                                          sales_growth_rank, earnings_revision_rank, margin_expansion_rank, roe_trend_rank)
     return float(res.get("score", 5.0) * 10.0) # scaled to 0-100
+
 
 
 def calculate_technical_score(indic: Dict) -> float:
@@ -561,24 +573,43 @@ def run_screen(symbols: Optional[List[str]] = None,
     nifty_df = indices_data.get("NIFTY50")
     all_history = df_module.fetch_multiple_stocks(symbols)
 
-    # Calculate Market Breadth (percentage of universe stocks trading above 20-day EMA)
-    stocks_above_20ema = 0
-    total_valid_stocks = 0
-    for sym, df_hist in all_history.items():
-        if df_hist is not None and len(df_hist) >= 20:
-            total_valid_stocks += 1
-            close = float(df_hist['Close'].iloc[-1])
-            ema20 = float(df_hist['Close'].ewm(span=20, adjust=False).mean().iloc[-1])
-            if close > ema20:
-                stocks_above_20ema += 1
-                
-    market_breadth = (stocks_above_20ema / total_valid_stocks) if total_valid_stocks > 0 else 0.5
-    print(f"📊 Market Breadth (stocks above 20 EMA): {market_breadth*100:.1f}%")
+    # Calculate Market Breadth (percentage of universe stocks above their 50 and 200 EMA)
+    # EMA50 needs >=50 bars; EMA200 needs >=200 bars. Track separately.
+    stocks_above_50ema = 0
+    stocks_above_200ema = 0
+    total_valid_50 = 0
+    total_valid_200 = 0
 
-    # Evaluate market environment regime with 5 states
-    print("🌐 Evaluating market environment regime...")
+    for sym, df_hist in all_history.items():
+        if df_hist is None or len(df_hist) < 50:
+            continue
+        close_series = df_hist["Close"]
+        close = float(close_series.iloc[-1])
+
+        # EMA50 breadth — only need 50 bars
+        ema50 = float(close_series.ewm(span=50, adjust=False).mean().iloc[-1])
+        total_valid_50 += 1
+        if close > ema50:
+            stocks_above_50ema += 1
+
+        # EMA200 breadth — only count if enough history
+        if len(df_hist) >= 200:
+            ema200 = float(close_series.ewm(span=200, adjust=False).mean().iloc[-1])
+            total_valid_200 += 1
+            if close > ema200:
+                stocks_above_200ema += 1
+
+    market_breadth_50 = (stocks_above_50ema / total_valid_50) if total_valid_50 > 0 else 0.5
+    # For 200-EMA, fall back to 50-EMA breadth if not enough long-history stocks
+    market_breadth_200 = (stocks_above_200ema / total_valid_200) if total_valid_200 > 0 else market_breadth_50
+    market_breadth = (market_breadth_50 + market_breadth_200) / 2.0
+    print(f"📊 Market Breadth (>50 EMA: {market_breadth_50*100:.1f}% [{total_valid_50} stocks] | >200 EMA: {market_breadth_200*100:.1f}% [{total_valid_200} stocks])")
+
+
+    # ── STAGE 2: Regime Engine (8 adaptive states) ──
+    print("🌐 Evaluating 8-state adaptive market regime...")
     db = db_manager.get_db()
-    prev_breadth = market_breadth
+    prev_breadth_50 = market_breadth_50
     try:
         from datetime import date, timedelta
         prev_pick = None
@@ -589,13 +620,20 @@ def run_screen(symbols: Optional[List[str]] = None,
             if prev_picks:
                 prev_pick = prev_picks[-1]
         if prev_pick:
-            prev_breadth = prev_pick.get("market_breadth", market_breadth)
+            prev_breadth_50 = prev_pick.get("market_breadth", market_breadth_50)
     except Exception:
         pass
 
-    market_regime = get_market_regime(nifty_df, market_breadth, prev_breadth)
-    market_is_bullish = market_regime == "Bull"
-    print(f"   Market regime: {market_regime.upper()}")
+    market_regime_8, market_is_risk_on, regime_data = re_module.classify_regime(
+        nifty_df, market_breadth_50, market_breadth_200,
+        prev_breadth_50=prev_breadth_50, all_history=all_history
+    )
+    market_regime_legacy = re_module.get_legacy_regime(market_regime_8)
+    market_is_bullish = market_regime_8 in ("Bull_Trend", "Bull_Expansion")
+    buying_permitted = re_module.is_buying_permitted(market_regime_8)
+    ensemble_weights = re_module.get_ensemble_weights(market_regime_8)
+    print(f"   Regime: {market_regime_8} (Legacy: {market_regime_legacy})")
+    print(f"   Risk On: {market_is_risk_on} | Buying Permitted: {buying_permitted}")
 
     # Scan sector indices
     sector_trends = {}
@@ -610,7 +648,49 @@ def run_screen(symbols: Optional[List[str]] = None,
     }
     for sector_name, idx_key in sector_index_map.items():
         idx_df = indices_data.get(idx_key)
-        sector_trends[sector_name] = df_module.get_market_trend(idx_df) if idx_df is not None else "unknown"
+        try:
+            sector_ret = (idx_df["Close"].iloc[-1] / idx_df["Close"].iloc[-20] - 1) * 100
+            nifty_ret = (nifty_df["Close"].iloc[-1] / nifty_df["Close"].iloc[-20] - 1) * 100
+            sector_trends[sector_name] = sector_ret - nifty_ret
+        except Exception:
+            sector_trends[sector_name] = 0.0
+
+    # ── Drawdown-Aware Risk Setup ──
+    print("🛡️ Evaluating account drawdown for position sizing...")
+    account_dd = rm.get_account_drawdown()
+    dd_risk = rm.get_drawdown_adjusted_risk(account_dd_pct=account_dd)
+    effective_risk_pct = dd_risk["risk_pct"]
+    if not dd_risk["allowed"]:
+        print(f"   🚨 DRAWDOWN HALT: {dd_risk['reason']}")
+    elif dd_risk["multiplier"] < 1.0:
+        print(f"   ⚠️ Reduced sizing: {dd_risk['reason']}")
+    else:
+        print(f"   Account DD: {account_dd:.1f}% → Normal sizing")
+
+    # ── STAGE 2b: Market Pulse — Buyer vs Seller Balance ──
+    print("💹 Computing Market Pulse (buyer vs seller balance)...")
+    try:
+        market_pulse_data = pulse_module.compute_pulse(all_history)
+        pulse_score = market_pulse_data["pulse_score"]
+        pulse_label = market_pulse_data["pulse_label"]
+        pulse_emoji = market_pulse_data["pulse_emoji"]
+        print(f"   {pulse_emoji} Pulse: {pulse_score:.0f}/100 ({pulse_label})")
+        print(f"   VIX: {market_pulse_data['vix']:.1f} | "
+              f"A/D: {market_pulse_data['advances']}/{market_pulse_data['declines']} | "
+              f"Buying Pressure: {market_pulse_data['buying_pressure']:.0f}% | "
+              f"CMF: {market_pulse_data['cmf_score']:.0f} | "
+              f"Volume: {market_pulse_data['volume_score']:.0f}")
+        print(f"   → {market_pulse_data['interpretation']}")
+        if market_pulse_data["downgrade_buy"]:
+            print(f"   ⚠️ PULSE GATE: Sellers dominant (score={pulse_score}) — BUY signals will be downgraded to WATCH")
+    except Exception as pe:
+        logger.warning(f"Market Pulse failed (non-fatal): {pe}")
+        market_pulse_data = {
+            "pulse_score": 50.0, "pulse_label": "NEUTRAL", "pulse_emoji": "⚪",
+            "vix": 15.0, "advances": 0, "declines": 0, "ad_ratio": 0.5,
+            "buying_pressure": 50.0, "cmf_score": 50.0, "volume_score": 50.0,
+            "downgrade_buy": False, "interpretation": "Pulse unavailable — neutral assumed."
+        }
 
     # ─────────────────────────────────────────────
     # STAGE 1: Hard Safety Gating Filter
@@ -648,7 +728,7 @@ def run_screen(symbols: Optional[List[str]] = None,
                 
             # Hard Risk Gating
             risk_score, max_dd, atr_pct = evaluate_risk_profile(df_hist, indic)
-            risk_threshold = 4.2 if market_regime in ["Neutral", "Bear", "Deteriorating"] else 5.0
+            risk_threshold = 4.2 if market_regime_legacy in ["Neutral", "Bear", "Deteriorating"] else 5.0
             if risk_score > risk_threshold:  # Gating threshold
                 continue
                 
@@ -693,10 +773,16 @@ def run_screen(symbols: Optional[List[str]] = None,
         return {
             "date":           datetime.now().strftime("%Y-%m-%d"),
             "scan_time":      datetime.now().strftime("%H:%M:%S"),
-            "market_trend":   market_regime.lower(),
+            "market_trend":   market_regime_8.lower(),
+            "market_trend_legacy": market_regime_legacy.lower(),
             "market_bullish": market_is_bullish,
+            "market_risk_on": market_is_risk_on,
             "market_breadth": round(market_breadth, 2),
+            "market_breadth_50": round(market_breadth_50, 2),
+            "market_breadth_200": round(market_breadth_200, 2),
+            "regime_data":    regime_data,
             "sector_trends":  sector_trends,
+            "account_drawdown_pct": account_dd,
             "top_picks":      [],
             "scanned":        len(symbols),
             "qualified":      0,
@@ -715,6 +801,7 @@ def run_screen(symbols: Optional[List[str]] = None,
     raw_margin_expansion_map = {}
     raw_earnings_revision_map = {}
     raw_roe_trend_map = {}
+    raw_fcf_growth_map = {}
     raw_earnings_surprise_map = {}
     raw_turnover_map = {item["symbol"]: float(item["avg_value"]) for item in survivors}
     
@@ -725,6 +812,7 @@ def run_screen(symbols: Optional[List[str]] = None,
         raw_margin_expansion_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_margins", [])))
         raw_earnings_revision_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_eps", [])))
         raw_roe_trend_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_profits", [])))
+        raw_fcf_growth_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_fcf", [])))
         raw_earnings_surprise_map[sym] = float(f.get("earnings_surprise") or 0.0)
         
     rs_percentiles = compute_percentiles(raw_rs_map)
@@ -737,6 +825,7 @@ def run_screen(symbols: Optional[List[str]] = None,
     margin_expansion_percentiles = compute_percentiles(raw_margin_expansion_map)
     earnings_revision_percentiles = compute_percentiles(raw_earnings_revision_map)
     roe_trend_percentiles = compute_percentiles(raw_roe_trend_map)
+    fcf_growth_percentiles = compute_percentiles(raw_fcf_growth_map)
     earnings_surprise_percentiles = compute_percentiles(raw_earnings_surprise_map)
     turnover_percentiles = compute_percentiles(raw_turnover_map)
 
@@ -805,13 +894,14 @@ def run_screen(symbols: Optional[List[str]] = None,
                 sales_growth_rank=sales_growth_percentiles[symbol],
                 earnings_revision_rank=earnings_revision_percentiles[symbol],
                 margin_expansion_rank=margin_expansion_percentiles[symbol],
-                roe_trend_rank=roe_trend_percentiles[symbol]
+                roe_trend_rank=roe_trend_percentiles[symbol],
+                fcf_growth_rank=fcf_growth_percentiles[symbol]
             )
-            
+
             tech_score = calculate_technical_score(indic)
             earn_score = calculate_earnings_catalyst_score(earnings_surprise_percentiles[symbol], profit_growth_percentiles[symbol])
             opp_score = calculate_opportunity_score(df_hist, indic, ms)
-            
+
             structure = ms.get("structure", "sideways")
             ms_strength = ms.get("strength", 0)
             structure_scores = {
@@ -825,46 +915,58 @@ def run_screen(symbols: Optional[List[str]] = None,
             if structure in ["uptrend", "breakout"] and ms_strength >= 75:
                 struct_score = min(100.0, struct_score + 15.0)
 
-            # 1. Composite Alpha Score calculation
-            alpha_score = (
-                (getattr(config, "WEIGHT_RS", 15) / 100.0) * rs_score +
-                (getattr(config, "WEIGHT_MARKET_STRUCTURE", 15) / 100.0) * struct_score +
-                (getattr(config, "WEIGHT_TECHNICAL", 15) / 100.0) * tech_score +
-                (getattr(config, "WEIGHT_INSTITUTIONAL", 15) / 100.0) * inst_score +
-                (getattr(config, "WEIGHT_FUNDAMENTALS", 20) / 100.0) * fund_score +
-                (getattr(config, "WEIGHT_EARNINGS", 10) / 100.0) * earn_score +
-                (getattr(config, "WEIGHT_SECTOR", 5) / 100.0) * sect_score +
-                (getattr(config, "WEIGHT_OPPORTUNITY", 5) / 100.0) * opp_score
+            # ── STAGE 3a: ENSEMBLE ALPHA ENGINE ──
+            percentiles_for_stock = {
+                "rs": rs_percentiles.get(symbol, 50.0),
+                "volume": volume_percentiles.get(symbol, 50.0),
+                "cmf": cmf_percentiles.get(symbol, 50.0),
+                "roe": roe_percentiles.get(symbol, 50.0),
+                "fcf_growth": fcf_growth_percentiles.get(symbol, 50.0),
+                "margin_expansion": margin_expansion_percentiles.get(symbol, 50.0),
+                "revenue_growth": revenue_growth_percentiles.get(symbol, 50.0),
+                "earnings_surprise": earnings_surprise_percentiles.get(symbol, 50.0),
+                "earnings_revision": earnings_revision_percentiles.get(symbol, 50.0),
+                "profit_growth": profit_growth_percentiles.get(symbol, 50.0),
+            }
+
+            ensemble_result = ae_module.compute_ensemble_alpha(
+                symbol=symbol,
+                indic=indic,
+                fund=fund,
+                news=news,
+                ms=ms,
+                regime=market_regime_8,
+                percentiles=percentiles_for_stock,
+                struct_score=struct_score,
             )
-            
-            # Momentum Leadership Boost (up to +10 alpha points)
-            leadership_boost = 0.0
-            if rs_score >= 75.0:
-                if sector in leading_sectors or industry in leading_industries:
-                    leadership_boost = 7.5
-            alpha_score = min(100.0, alpha_score + leadership_boost)
-            
-            # 2. Setup Expectancy & Classification Engine
+            ensemble_alpha = ensemble_result["alpha"]
+            confidence_score = ensemble_result["confidence"]
+            mom_score = ensemble_result["momentum_score"]
+            qual_score = ensemble_result["quality_score"]
+            inst_score_ens = ensemble_result["institutional_score"]
+            cat_score = ensemble_result["catalyst_score"]
+
+            # ── STAGE 3b: META MODEL ADJUSTMENT ──
             trade_type = rm.get_trade_type(
-                ms.get("structure", ""), 
-                float(indic.get("gap_pct", 0)), 
-                float(indic.get("rsi", 50)), 
-                indic, 
-                fund
+                ms.get("structure", ""),
+                float(indic.get("gap_pct", 0)),
+                float(indic.get("rsi", 50)),
+                indic, fund
             )
-            
-            # Regimes and bucketing
+            meta_alpha, meta_info = mm_module.adjust_alpha(
+                ensemble_alpha, trade_type, market_regime_legacy
+            )
+
+            # ── STAGE 3c: EV HYBRID RANKING (70% Alpha + 30% EV) ──
             nifty_vol = calculate_nifty_realized_volatility(nifty_df)
             volatility_regime = "high" if nifty_vol > 22.0 else "normal"
             breadth_regime = "weak" if market_breadth < 0.30 else "strong" if market_breadth >= 0.60 else "normal"
-            
             avg_value = item["avg_value"]
             liquidity_bucket = "high" if avg_value >= 500000000 else "medium" if avg_value >= 150000000 else "low"
-            
+
             dist_ema20 = float(indic.get("dist_from_ema20", 0.0))
             bb_squeeze = indic.get("bb_squeeze", False)
             dist_52w = float(indic.get("dist_52w_high", -100))
-            
             if trade_type == "BREAKOUT":
                 setup_subtype = "bb_squeeze" if bb_squeeze else "52w_high_breakout" if dist_52w >= -2.0 else "standard"
             elif trade_type == "PULLBACK":
@@ -872,34 +974,64 @@ def run_screen(symbols: Optional[List[str]] = None,
             else:
                 setup_subtype = "standard"
 
-            # Fetch setup expectancy statistics
             setup_exp = db_manager.get_setup_expectancy(
-                trade_type,
-                market_regime=market_regime,
-                sector=sector,
-                score=alpha_score,
-                volatility_regime=volatility_regime,
-                breadth_regime=breadth_regime,
-                liquidity_bucket=liquidity_bucket,
+                trade_type, market_regime=market_regime_legacy, sector=sector,
+                score=meta_alpha, volatility_regime=volatility_regime,
+                breadth_regime=breadth_regime, liquidity_bucket=liquidity_bucket,
                 setup_subtype=setup_subtype
             )
             win_rate = setup_exp.get("win_rate", 50.0)
             avg_return = setup_exp.get("avg_return", 0.0)
             expectancy = setup_exp.get("expectancy", 0.0)
-            confidence_score = win_rate
-            
-            # 3. Penalty Engine
+            ev_sample_size = setup_exp.get("sample_size", 0)
+
+            # EV confidence scales with sample size (0 at n=0, 1.0 at n>=30)
+            ev_confidence = min(1.0, ev_sample_size / 30.0)
+            # When EV data is sparse, rely more on alpha
+            ev_weight = 0.30 * ev_confidence
+            alpha_weight = 1.0 - ev_weight
+            ev_score = min(100.0, max(0.0, 50.0 + expectancy * 10.0))  # Map EV → 0-100
+            final_score = alpha_weight * meta_alpha + ev_weight * ev_score
+
+            # ── Legacy scoring fields (kept for dashboard + audit compat) ──
+            rs_score = rs_percentiles.get(symbol, 50.0)
+            sect_score = calculate_sector_score(sector, sector_trends)
             penalty = calculate_penalties(fund, indic)
-            if market_regime == "Bear":
+            if market_regime_legacy == "Bear":
                 is_defense = sector.lower() in ["healthcare", "consumer defensive", "utilities"]
                 if not is_defense:
                     penalty -= 15.0
-            adjusted_alpha = alpha_score + penalty
+            adjusted_alpha = final_score + penalty
+
+            # Momentum Leadership Boost (up to +10 alpha points)
+            inst_score = calculate_institutional_score(volume_percentiles[symbol], cmf_percentiles[symbol])
+            leadership_boost = 0.0
+            if rs_score >= 75.0:
+                if sector in leading_sectors or industry in leading_industries:
+                    leadership_boost = 7.5
+            adjusted_alpha = min(100.0, adjusted_alpha + leadership_boost)
             
             # Format Bullet Points Reasons
             sentiment = news.get("news_sentiment", "neutral")
             reasons = _build_reasons_v3(indic, ms, fund, news, market_is_bullish, sector, sector_trends, adjusted_alpha)
             bullish_factors, bearish_factors = _get_factors(fund, indic, item["missing_fields"], sentiment)
+
+            # Tech/legacy scores for dashboard compatibility
+            tech_score = calculate_technical_score(indic)
+            earn_score = calculate_earnings_catalyst_score(
+                earnings_surprise_percentiles[symbol], profit_growth_percentiles[symbol]
+            )
+            fund_score_legacy = calculate_fundamental_score(
+                fund,
+                roe_rank=roe_percentiles[symbol],
+                profit_growth_rank=profit_growth_percentiles[symbol],
+                revenue_growth_rank=revenue_growth_percentiles[symbol],
+                sales_growth_rank=sales_growth_percentiles[symbol],
+                earnings_revision_rank=earnings_revision_percentiles[symbol],
+                margin_expansion_rank=margin_expansion_percentiles[symbol],
+                roe_trend_rank=roe_trend_percentiles[symbol],
+                fcf_growth_rank=fcf_growth_percentiles[symbol]
+            )
             
             temp_candidates.append({
                 "name":               symbol.replace(".NS", "").replace(".BO", ""),
@@ -907,11 +1039,14 @@ def run_screen(symbols: Optional[List[str]] = None,
                 "adjusted_alpha":     adjusted_alpha,
                 "alpha_score":        round(adjusted_alpha, 1),
                 "total_score":        round(adjusted_alpha, 1),
+                "ensemble_alpha":     round(ensemble_alpha, 1),
+                "meta_alpha":         round(meta_alpha, 1),
                 "confidence_score":   round(confidence_score, 1),
+                "meta_info":          meta_info,
                 "expectancy_win_rate": round(win_rate, 1),
                 "expectancy_avg_return": round(avg_return, 2),
                 "expectancy_score":    round(expectancy, 2),
-                "opportunity_score":  round(opp_score, 1),
+                "opportunity_score":  round(opp_score, 1) if 'opp_score' in dir() else 0.0,
                 "risk_score":         round(item["risk_score"], 1),
                 
                 # Full output dictionary fields
@@ -923,14 +1058,19 @@ def run_screen(symbols: Optional[List[str]] = None,
                 "breadth_regime":     breadth_regime,
                 "liquidity_bucket":   liquidity_bucket,
                 
-                "rs_rank":            round(rs_score, 1),
+                "rs_rank":            round(rs_percentiles.get(symbol, 50.0), 1),
                 "structure_score":    round(struct_score, 1),
                 "technical_score":    round(tech_score, 1),
                 "institutional_score": round(inst_score, 1),
-                "fundamental_score":  round(fund_score, 1),
+                "fundamental_score":  round(fund_score_legacy, 1),
                 "earnings_score":     round(earn_score, 1),
                 "sector_rank":        round(sect_score, 1),
                 "liquidity_score":     round(turnover_percentiles.get(symbol, 50.0), 1),
+                # Ensemble sub-model scores
+                "momentum_sub_score": round(mom_score, 1),
+                "quality_sub_score":  round(qual_score, 1),
+                "institutional_sub_score": round(inst_score_ens, 1),
+                "catalyst_sub_score": round(cat_score, 1),
                 "sector":             sector,
                 
                 "news_summary":       f"Media announcements are {sentiment}. Recent announcements: {', '.join(news.get('headlines', ['No major headlines']))[:150]}.",
@@ -944,14 +1084,24 @@ def run_screen(symbols: Optional[List[str]] = None,
                     "data_quality":      round(item["data_quality_score"], 1),
                     "liquidity":         "pass",
                     "risk":              round(item["risk_score"], 1),
-                    "relative_strength": round(rs_score, 1),
+                    "relative_strength": round(rs_percentiles.get(symbol, 50.0), 1),
                     "institutional":     round(inst_score, 1),
                     "structure":         round(struct_score, 1),
                     "sector":            round(sect_score, 1),
-                    "fundamentals":      round(fund_score, 1),
+                    "fundamentals":      round(fund_score_legacy, 1),
                     "technical":         round(tech_score, 1),
                     "earnings":          round(earn_score, 1),
-                    "opportunity":       round(opp_score, 1)
+                    "opportunity":       round(opp_score, 1) if 'opp_score' in dir() else 0.0
+                },
+                "feature_tracking": {
+                    "momentum_pts": round(ensemble_weights["momentum"] * mom_score, 2),
+                    "quality_pts": round(ensemble_weights["quality"] * qual_score, 2),
+                    "institutional_pts": round(ensemble_weights["institutional"] * inst_score_ens, 2),
+                    "catalyst_pts": round(ensemble_weights["catalyst"] * cat_score, 2),
+                    "meta_adjustment_pts": meta_info.get("meta_adjustment_pts", 0),
+                    "ev_contribution_pts": round(ev_weight * ev_score, 2) if 'ev_weight' in dir() else 0,
+                    "regime": market_regime_8,
+                    "ensemble_weights": ensemble_weights
                 },
                 "df_hist":            df_hist,
                 "indic":              indic,
@@ -963,22 +1113,22 @@ def run_screen(symbols: Optional[List[str]] = None,
             logger.error(f"Error in Alpha Ranking for {symbol}: {e}")
             continue
 
-    # Sort candidates by Adjusted Alpha score descending to determine ranks and apply dual filters
+    # Sort by final_score (70% meta_alpha + 30% sample-adjusted EV) descending
     temp_candidates.sort(key=lambda x: x["adjusted_alpha"], reverse=True)
     N = len(temp_candidates)
-    
+
     candidates = []
     for idx, stock in enumerate(temp_candidates):
         rank_in_universe = idx + 1
         adj_alpha = stock["adjusted_alpha"]
-        
+
         # Enforce dual quality-percentile filters
         passes_dual_filter = False
-        if market_regime == "Bull":
+        if market_regime_legacy == "Bull":
             passes_dual_filter = (adj_alpha >= 70.0) and (rank_in_universe <= max(1, int(0.10 * N)))
-        elif market_regime in ["Improving", "Neutral"]:
+        elif market_regime_legacy in ["Improving", "Neutral"]:
             passes_dual_filter = (adj_alpha >= 75.0) and (rank_in_universe <= max(1, int(0.05 * N)))
-        else: # Bear or Deteriorating
+        else:  # Bear or Deteriorating
             passes_dual_filter = (adj_alpha >= 80.0) and (rank_in_universe <= max(1, int(0.03 * N)))
 
         # Calculate stop loss, targets & check R:R ratio
@@ -988,20 +1138,32 @@ def run_screen(symbols: Optional[List[str]] = None,
         rr_ratio_val = targets_dict.get("rr_ratio")
         
         is_confirmed = passes_dual_filter and (rr_ratio_val is not None and rr_ratio_val >= 1.5)
-        
-        # Strict Bullish Regime Gating Check
-        if getattr(config, "STRICT_BULL_ONLY_BUY", False) and market_regime != "Bull":
+
+        # Drawdown halt overrides BUY
+        if not dd_risk["allowed"]:
             is_confirmed = False
+
+        # Strict Bullish Regime Gating
+        if getattr(config, "STRICT_BULL_ONLY_BUY", False) and not buying_permitted:
+            is_confirmed = False
+
+        # ── STAGE 4: REALITY CHECK ──
+        rc_passes, rc_notes = rc_module.validate(stock["df_hist"], stock.get("fund", {}), stock.get("indic", {}))
+        if not rc_passes and is_confirmed:
+            is_confirmed = False
+            logger.info(f"[REALITY] {stock['symbol']} downgraded: {'; '.join(rc_notes)}")
             
         action_val = "BUY" if is_confirmed else "WATCH"
         action_color = "green" if action_val == "BUY" else "yellow"
-        
+
         stock["action"] = action_val
         stock["action_color"] = action_color
         stock["stop_loss"] = targets_dict["stop_loss"] if is_confirmed else None
         stock["target_1"] = targets_dict["target_1"] if is_confirmed else None
         stock["target_2"] = targets_dict["target_2"] if is_confirmed else None
         stock["rr_ratio"] = targets_dict["rr_ratio"] if is_confirmed else None
+        stock["reality_check_notes"] = rc_notes
+        stock["drawdown_info"] = {"account_dd_pct": account_dd, "risk_multiplier": dd_risk["multiplier"]}
         
         # Setup-specific execution rules
         trade_type = stock["trade_type"]
@@ -1019,8 +1181,8 @@ def run_screen(symbols: Optional[List[str]] = None,
             else:
                 execution_rule = "Confirm breakout with 1.8x volume and price above VWAP before entry."
         else:
-            if market_regime != "Bull" and getattr(config, "STRICT_BULL_ONLY_BUY", False):
-                execution_rule = f"Strictly monitor today. Market Trend is {market_regime.upper()} (Risk Shield active — DO NOT enter trades)."
+            if market_regime_legacy != "Bull" and getattr(config, "STRICT_BULL_ONLY_BUY", False):
+                execution_rule = f"Strictly monitor today. Market Trend is {market_regime_legacy.upper()} (Risk Shield active — DO NOT enter trades)."
             else:
                 execution_rule = "Strictly monitor today. DO NOT enter trades."
         
@@ -1033,77 +1195,57 @@ def run_screen(symbols: Optional[List[str]] = None,
         candidates.append(stock)
 
     # ─────────────────────────────────────────────
-    # STAGE 4: Portfolio Assembly & Correlation Control
+    # STAGE 6: Portfolio Assembly via PortfolioEngine
     # ─────────────────────────────────────────────
-    print(f"\n💼 Constructing portfolio & running Pearson Correlation controls...")
-    portfolio = []
-    sector_counts = {}
-    industry_counts = {}
-    
-    # Active heat check
-    active_heat = get_active_open_positions_heat()
-    heat_limits = {
-        "Bull": 12.0,
-        "Improving": 10.0,
-        "Neutral": 8.0,
-        "Deteriorating": 6.0,
-        "Bear": 4.0
-    }
-    heat_limit = heat_limits.get(market_regime, 8.0)
-    risk_per_trade_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.02) * 100.0
-    proposed_dfs = []
-    
+    print(f"\n💼 Constructing portfolio via Portfolio Engine...")
+    portfolio_builder = PortfolioEngine(
+        risk_per_trade_pct=effective_risk_pct * 100.0,
+        heat_limit_pct=getattr(config, "PORTFOLIO_MAX_RISK_PCT", 0.06) * 100.0
+    )
+    # Seed with active heat from prior open positions
+    portfolio_builder.active_heat = get_active_open_positions_heat()
+
+    kill_switch_active = db_manager.is_kill_switch_active()
+    if kill_switch_active:
+        print("\n🚨 KILL SWITCH ACTIVE: Protective sequence engaged. Suspending new buys.")
+
     for stock in candidates:
         symbol = stock["symbol"]
-        sector = stock["sector"]
-        industry = stock["fund"].get("industry", "Unknown")
         df_hist = stock["df_hist"]
         action = stock["action"]
-        
-        # 1. Sector Concentration Limit check (Max 2 stocks per sector)
-        s_count = sector_counts.get(sector, 0)
-        if s_count >= 2:
-            continue
-            
-        # 2. Industry Concentration Limit check (Max 1 stock per industry)
-        ind_count = industry_counts.get(industry, 0)
-        if ind_count >= 1:
-            continue
-            
-        # 3. Portfolio Heat Control (only for BUY picks)
-        if action == "BUY":
-            if active_heat + risk_per_trade_pct > heat_limit:
-                print(f"   Skipping {symbol}: Heat limit exceeded ({active_heat + risk_per_trade_pct:.1f}% > {heat_limit:.1f}%)")
-                continue
-            
-        # 4. Pearson Correlation Gating
-        temp_dfs = proposed_dfs + [df_hist]
-        if len(temp_dfs) >= 2:
-            avg_corr = calculate_avg_pairwise_correlation(temp_dfs)
-            if avg_corr > 0.60:
-                print(f"   Skipping {symbol}: Average pairwise correlation would be {avg_corr:.2f} (> 0.60)")
-                continue
-                
-        # Proximity correlation (single asset check)
-        single_correlated = False
-        for active in portfolio:
-            r = get_historical_correlation(df_hist, active["df_hist"])
-            if r > 0.80:
-                single_correlated = True
-                break
-        if single_correlated:
-            continue
-            
-        # Passed portfolio construction! Add to final selection.
-        portfolio.append(stock)
-        proposed_dfs.append(df_hist)
-        sector_counts[sector] = s_count + 1
-        industry_counts[industry] = ind_count + 1
-        if action == "BUY":
-            active_heat += risk_per_trade_pct
-        
-        if len(portfolio) >= top_n:
+
+        # Kill switch overrides BUY
+        if kill_switch_active and action == "BUY":
+            stock["action"] = "WATCH"
+            stock["action_color"] = "yellow"
+            stock["execution_rule"] = "Kill Switch Active — Strict Watchlist Only."
+            action = "WATCH"
+
+        # Market Pulse gate — sellers strongly dominant → downgrade BUY to WATCH
+        if action == "BUY" and market_pulse_data.get("downgrade_buy", False):
+            stock["action"] = "WATCH"
+            stock["action_color"] = "yellow"
+            stock["execution_rule"] = (
+                f"Pulse Gate: Sellers dominant today (Pulse={market_pulse_data['pulse_score']:.0f}/100, "
+                f"VIX={market_pulse_data['vix']:.1f}). Wait for buyer confirmation."
+            )
+            action = "WATCH"
+
+        accept, reject_reason = portfolio_builder.accepts(stock, df_hist, action)
+        if not accept:
+            if action == "BUY":
+                # Downgrade to WATCH rather than discard entirely
+                stock["action"] = "WATCH"
+                stock["action_color"] = "yellow"
+                stock["execution_rule"] = f"Portfolio constraint: {reject_reason}"
+            # Still include as WATCH pick (informational)
+
+        portfolio_builder.add(stock, df_hist, stock["action"])
+
+        if portfolio_builder.size() >= top_n:
             break
+
+    portfolio = portfolio_builder.get_portfolio()
 
     # Clean up DF and fund before return to avoid serialisation issues
     for item in portfolio:
@@ -1120,20 +1262,27 @@ def run_screen(symbols: Optional[List[str]] = None,
         item["position_rank"] = rank_idx
 
     elapsed = (datetime.now() - start_time).seconds
-    print(f"\n✅ STALKER Alpha Engine completed in {elapsed}s.")
-    print(f"   Scanned: {len(symbols)} | Qualified: {len(candidates)} | Top Picks Portfolio: {len(portfolio)} opportunities.")
+    print(f"\n✅ STALKER Alpha Engine v5.0 completed in {elapsed}s.")
+    print(f"   Scanned: {len(symbols)} | Qualified: {len(candidates)} | Portfolio: {len(portfolio)}")
 
     return {
-        "date":           datetime.now().strftime("%Y-%m-%d"),
-        "scan_time":      datetime.now().strftime("%H:%M:%S"),
-        "market_trend":   market_regime.lower(),
-        "market_bullish": market_is_bullish,
-        "market_breadth": round(market_breadth, 2),
-        "sector_trends":  sector_trends,
-        "top_picks":      portfolio,
-        "scanned":        len(symbols),
-        "qualified":      len(candidates),
-        "elapsed_sec":    elapsed,
+        "date":                 datetime.now().strftime("%Y-%m-%d"),
+        "scan_time":            datetime.now().strftime("%H:%M:%S"),
+        "market_trend":         market_regime_8.lower(),
+        "market_trend_legacy":  market_regime_legacy.lower(),
+        "market_bullish":       market_is_bullish,
+        "market_risk_on":       market_is_risk_on,
+        "market_breadth":       round(market_breadth, 2),
+        "market_breadth_50":    round(market_breadth_50, 2),
+        "market_breadth_200":   round(market_breadth_200, 2),
+        "regime_data":          regime_data,
+        "sector_trends":        sector_trends,
+        "account_drawdown_pct": account_dd,
+        "market_pulse":         market_pulse_data,
+        "top_picks":            portfolio,
+        "scanned":              len(symbols),
+        "qualified":            len(candidates),
+        "elapsed_sec":          elapsed,
     }
 
 
@@ -1192,9 +1341,9 @@ def _build_reasons_v3(indic, ms, fund, news, market_bullish, sector, sector_tren
         reasons.append("⚡ Confirmed Uptrend Structure: Solid technical slope with short and medium term EMAs aligned bullishly.")
         
     # 4. Sector Rotation
-    sect_trend = sector_trends.get(sector, "unknown")
-    if sect_trend == "bullish":
-        reasons.append(f"🏭 Industry Leadership: Strong capital inflows in the {sector} sector today.")
+    sect_rs = sector_trends.get(sector, 0.0)
+    if sect_rs > 2.0:
+        reasons.append(f"🏭 Industry Leadership: {sector} sector is outperforming the market by +{sect_rs:.1f}%.")
         
     return reasons[:3]
 

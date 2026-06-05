@@ -466,6 +466,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
         "quarterly_profits": [],
         "quarterly_eps": [],
         "quarterly_margins": [],
+        "quarterly_fcf": [],
     }
 
     if is_blocked:
@@ -506,6 +507,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
             "quarterly_profits": [],
             "quarterly_eps": [],
             "quarterly_margins": [],
+            "quarterly_fcf": [],
         }
 
         # Convert debt_to_equity (yfinance gives it as %, divide by 100)
@@ -516,7 +518,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
         fundamentals["has_recent_earnings"] = False
         fundamentals["earnings_surprise"] = None
 
-        # Fetch quarterly financials
+        # Fetch quarterly financials and cash flow
         try:
             q_fin = ticker.quarterly_financials
             if q_fin is not None and not q_fin.empty:
@@ -524,8 +526,6 @@ def fetch_fundamentals(symbol: str) -> Dict:
                 net_inc_row = q_fin.loc['Net Income'] if 'Net Income' in q_fin.index else None
                 eps_row = q_fin.loc['Diluted EPS'] if 'Diluted EPS' in q_fin.index else (q_fin.loc['Basic EPS'] if 'Basic EPS' in q_fin.index else None)
                 
-                # yfinance columns are ordered descending by date (e.g. 2024-03-31, 2023-12-31...)
-                # Reverse to get chronological order (oldest to newest)
                 if rev_row is not None:
                     fundamentals["quarterly_revs"] = [float(v) for v in rev_row.values[:4][::-1] if not pd.isna(v)]
                 if net_inc_row is not None:
@@ -535,8 +535,14 @@ def fetch_fundamentals(symbol: str) -> Dict:
                 if rev_row is not None and net_inc_row is not None:
                     margins = net_inc_row / rev_row.replace(0, 1e-10)
                     fundamentals["quarterly_margins"] = [float(v) for v in margins.values[:4][::-1] if not pd.isna(v)]
+                    
+            q_cf = ticker.quarterly_cash_flow
+            if q_cf is not None and not q_cf.empty:
+                fcf_row = q_cf.loc['Free Cash Flow'] if 'Free Cash Flow' in q_cf.index else None
+                if fcf_row is not None:
+                    fundamentals["quarterly_fcf"] = [float(v) for v in fcf_row.values[:4][::-1] if not pd.isna(v)]
         except Exception as q_err:
-            logger.debug(f"Quarterly financials fetch failed for {symbol}: {q_err}")
+            logger.debug(f"Quarterly financials/cashflow fetch failed for {symbol}: {q_err}")
 
         # Save to cache
         _fundamentals_cache[symbol] = {

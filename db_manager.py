@@ -191,8 +191,40 @@ def save_eod_report(eod_data: Dict) -> bool:
 
 
 # ─────────────────────────────────────────────
-# FETCH FOR DASHBOARD
+# FETCH FOR DASHBOARD & EXECUTION
 # ─────────────────────────────────────────────
+
+def is_kill_switch_active() -> bool:
+    """
+    Check if the kill switch is active based on the most recent tracked picks.
+    If the last N consecutive tracked picks resulted in a loss, trigger kill switch.
+    Returns True if buying should be suspended.
+    """
+    recent = get_recent_picks(15)
+    if not recent:
+        return False
+        
+    losses_in_a_row = 0
+    recent = sorted(recent, key=lambda x: x.get("date", ""), reverse=True)
+    
+    for day_record in recent:
+        picks = day_record.get("picks", day_record.get("top_picks", []))
+        if not picks: continue
+        
+        for pick in picks:
+            # Look for completed trade tracking
+            ret = pick.get("future_5d_return") or pick.get("future_3d_return")
+            if ret is not None:
+                if ret < 0:
+                    losses_in_a_row += 1
+                    if losses_in_a_row >= getattr(config, "KILL_SWITCH_LOSS_COUNT", 5):
+                        return True
+                else:
+                    return False  # Profit breaks the sequence
+                    
+    return False
+
+
 
 def get_today_picks() -> Optional[Dict]:
     """Get today's picks for the dashboard."""

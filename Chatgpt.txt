@@ -1,0 +1,693 @@
+I went through your documentation in detail. The surprising thing is: the problem is probably not that you don't have enough filters. The problem is that you have too many lagging filters and almost no proof that the factors actually predict future returns.
+
+If I were reviewing this as a quant/developer, these are the biggest issues I'd focus on.
+
+1. Biggest Mistake: You're Ranking Stocks, Not Predicting Returns
+
+Your system calculates an "Alpha Score" from 8 models and then assumes the highest score stocks will outperform.
+
+But nowhere in the document do I see:
+
+Backtesting
+Factor validation
+Win-rate measurement per factor
+Feature importance analysis
+
+For example:
+
+You give:
+
+Relative Strength = 20%
+Institutional = 20%
+Structure = 15%
+Technical = 12%
+Sector = 12%
+
+But why?
+
+Why not:
+
+RS = 40%
+Technical = 5%
+Sector = 25%
+
+The weights appear manually chosen rather than statistically derived.
+
+A common quant mistake:
+
+"This indicator sounds good, so I'll give it 20%."
+
+Markets don't care whether something sounds logical.
+
+2. News Analysis Is Extremely Weak
+
+You are checking keywords like:
+
+profit
+growth
+upgrade
+acquisition
+
+and bearish words like:
+
+loss
+downgrade
+debt
+crisis
+
+This creates a huge problem.
+
+Example:
+
+"Company profit growth slows significantly."
+
+Contains:
+
+profit
+growth
+
+Your model may classify it as bullish.
+
+But market may crash the stock.
+
+Keyword sentiment is notoriously unreliable.
+
+Many hedge funds abandoned keyword systems years ago because context matters far more than keywords.
+
+3. Your Relative Strength Is Too Short-Term
+
+You calculate:
+
+RS = 20-day stock return - 20-day Nifty return.
+
+20 days is very noisy.
+
+What happens?
+
+Stock rallies:
+
++15% in 20 days.
+
+Your system gives it huge RS.
+
+But often that stock is already extended and due for profit booking.
+
+Professional momentum systems often evaluate:
+
+3 month
+6 month
+12 month
+
+and avoid only using very short lookbacks.
+
+4. You Are Buying Near Resistance
+
+This is a very important flaw.
+
+Opportunity Score gives:
+
++35 if within 3% of resistance
++15 if near 52-week high
+
+Think about what that means.
+
+Your system often selects stocks that:
+
+already ran up
+already became obvious
+are sitting near a selling zone
+
+Result:
+
+You buy.
+
+Resistance rejects.
+
+Stock falls.
+
+You see losses.
+
+This is exactly what many retail traders experience.
+
+5. You Never Verify Whether Your Signals Work
+
+The EOD report measures:
+
+Open → Close return
+VWAP
+Relative strength
+Momentum
+
+But what you actually need is:
+
+For every factor:
+
+Factor	Avg Next 5 Day Return
+RS > 80	?
+RSI 55-70	?
+Volume Surge > 1.5	?
+Breakout	?
+
+Without this, you don't know which signals actually contribute.
+
+6. Survivorship Bias Risk
+
+Universe:
+
+Nifty 50
+Midcaps
+Blue chips
+
+Question:
+
+Are you using today's list of stocks when backtesting old dates?
+
+If yes:
+
+Huge survivorship bias.
+
+Because:
+
+Bad companies disappear.
+
+Good companies remain.
+
+Historical performance becomes artificially inflated.
+
+7. Technical Indicators Are Highly Correlated
+
+You're using:
+
+RSI
+MACD
+EMA Alignment
+VWAP
+Structure
+Relative Strength
+
+Most of these measure the same thing:
+
+Price is going up.
+
+So you're effectively counting momentum multiple times.
+
+Example:
+
+RS high → bullish
+
+EMA bullish → bullish
+
+MACD bullish → bullish
+
+Structure bullish → bullish
+
+The same signal may be receiving 4-5 separate rewards.
+
+This creates overconfidence.
+
+8. Fundamentals Have Almost No Weight
+
+Fundamental score:
+
+8%.
+
+Earnings score:
+
+8%.
+
+Total:
+
+16%.
+
+Meanwhile momentum-related signals dominate.
+
+This turns the model into:
+
+A momentum screener pretending to be a multi-factor model.
+
+If the goal is swing trading that's okay.
+
+If the goal is consistent alpha, it may not be.
+
+9. The Market Regime Logic Is Oversimplified
+
+Current regime:
+
+Bull if:
+
+Above 50 EMA
+Above 200 MA
+
+Markets aren't just:
+
+Bull
+Neutral
+Bear
+
+Many losses happen during:
+
+late bull markets
+distribution phases
+choppy ranges
+
+Your model may still aggressively buy during weak bull phases.
+
+10. No Actual Edge Validation
+
+This is the biggest issue.
+
+Nowhere do I see:
+
+"What happens if I buy the top 15 stocks tomorrow and hold for 5 days?"
+
+or
+
+"How did the model perform over the last 3 years?"
+
+Without this:
+
+You have a very sophisticated stock screener.
+
+Not a proven trading system.
+
+What I Would Do First
+
+Before adding a single new indicator:
+
+Step 1
+
+Run historical backtest:
+
+For every trading day of last 3 years:
+
+Generate top 15 picks
+Buy next day open
+Exit after:
+3 days
+5 days
+10 days
+
+Measure:
+
+CAGR
+Win rate
+Average return
+Max drawdown
+Sharpe ratio
+Step 2
+
+Store every factor score separately.
+
+Example:
+
+{
+  "stock": "TCS",
+  "rs": 82,
+  "technical": 71,
+  "institutional": 55,
+  "sector": 88,
+  "future_5_day_return": 4.2
+}
+
+After 1000+ observations:
+
+Check correlation between each factor and future returns.
+
+You'll discover:
+
+some factors matter a lot
+some factors are useless
+some factors are actually harmful
+Step 3
+
+Reduce factors.
+
+Many successful quant systems use only:
+
+Relative strength
+Volume
+Earnings revisions
+
+or
+
+Momentum
+Quality
+Volatility
+
+instead of 15+ confirmations.
+
+My overall assessment:
+
+The architecture is well thought out and much better than most retail stock screeners. The main weakness is not coding or filters—it's the absence of evidence that the scoring system predicts future returns. You're optimizing for "stocks that look good today," not necessarily "stocks that go up tomorrow."
+
+If you can share the actual Python code (especially screener.py, scoring functions, and a month's worth of generated picks with results), I can do a much deeper audit and point out specific logic errors that may be causing the losing trades.
+
+screener.py
+Python
+i've attached the screener.py
+
+Bhai ab actual code dekh ke bol raha hoon — documentation se zyada kuch serious issues code mein dikh rahe hain.
+
+🚨 Problem #1: Tum "next day prediction" nahi kar rahe, momentum chase kar rahe ho
+
+Technical score:
+
+if indic.get("ema_aligned"):
+    score += 25
+
+if indic.get("above_vwap"):
+    score += 10
+
+if indic.get("ema_slope_up"):
+    score += 10
+
+if indic.get("macd_bullish"):
+    score += 15
+
+Institutional score:
+
+volume_ratio
+green volume
+green days
+
+Structure score:
+
+uptrend
+breakout
+
+RS score:
+
+20 day outperformance
+
+Ye sab ek hi cheez measure kar rahe hain:
+
+Price already upar ja rahi hai
+
+Toh ek stock jo already 15-20% bhaag chuka hai usko:
+
+RS points
+EMA points
+MACD points
+Structure points
+Momentum points
+Sector points
+
+sab mil rahe hain.
+
+Effectively same signal ko 5 baar reward mil raha hai.
+
+🚨 Problem #2: Institutional Score fake hai
+
+Ye wala bahut dangerous hai.
+
+green_days = closes > opens
+
+Phir
+
+green_vol
+green day count
+
+Institutional buying detect kar rahe ho.
+
+Institutional buying aise detect nahi hoti.
+
+Institutional buyer:
+
+3 red candles mein bhi accumulate kar sakta hai
+delivery volume important hota hai
+block deals important hote hain
+
+Tum actually calculate kar rahe ho:
+
+"recent candles green hain"
+
+Institutional activity nahi.
+
+🚨 Problem #3: RS percentile is wrong for trading
+RS = 20 day return
+
+Phir percentile.
+
+Maan lo:
+
+Stock A = +25%
+
+Stock B = +12%
+
+Stock C = +8%
+
+A ko highest score milega.
+
+Par reality:
+
+A already exhausted ho sakta hai.
+
+B best trade ho sakta hai.
+
+Momentum systems mein usually use hota hai:
+
+3 month RS
+6 month RS
+12 month RS
+
+Aur recent 5-10 days ko separate treat kiya jata hai.
+
+🚨 Problem #4: Opportunity Score actually dangerous hai
+
+Code:
+
+if resistance and close <= resistance:
+    if dist_pct <= 0.03:
+        score += 35
+
+Yaani resistance ke paas jaoge toh reward.
+
+Mere experience se:
+
+Ye bahut false breakouts produce karega.
+
+Tumhe reward dena chahiye:
+
+Resistance breakout confirmed
++
+volume confirmation
++
+retest hold
+
+Na ki sirf resistance ke paas hone par.
+
+🚨 Problem #5: News Catalyst bahut weak gate hai
+
+Code:
+
+has_news_catalyst =
+news_sentiment == bullish
+or has_news
+or news_count > 0
+
+Matlab literally:
+
+news_count > 0
+
+toh catalyst pass.
+
+Agar company ne:
+
+AGM notice
+Board meeting notice
+Compliance filing
+
+dala ho
+
+tab bhi pass.
+
+Ye bahut noisy hai.
+
+🚨 Problem #6: Confidence Score fake confidence de raha hai
+
+Dekho:
+
+confidence_score =
+0.70 * data_quality
+
+Data quality mostly 100 rehta hoga.
+
+Toh confidence automatically:
+
+70+
+
+aajata hai.
+
+Ye confidence nahi hai.
+
+Ye sirf:
+
+data available hai
+
+batata hai.
+
+🚨 Problem #7: Correlation check wrong variable pe hai
+
+Ye bahut important hai.
+
+Tum use kar rahe ho:
+
+Close correlation
+corr(close1, close2)
+
+Stocks compare karne ke liye return correlation use karni chahiye.
+
+Example:
+
+TCS = 4000
+INFY = 1500
+
+Close prices naturally trend karenge.
+
+High correlation aa jayegi.
+
+Use:
+
+returns = close.pct_change()
+
+phir correlation.
+
+🚨 Problem #8: News, Fundamentals, Earnings ka weight bahut kam hai
+
+Current:
+
+Fundamental = 8%
+Earnings = 8%
+
+Total:
+
+16%
+
+Momentum related:
+
+RS
+Institutional
+Structure
+Technical
+Sector
+
+≈ 79%
+
+Yaani system ka actual naam hona chahiye:
+
+Momentum Engine
+
+Fundamental Engine nahi.
+
+🚨 Problem #9: Biggest bug — No Forward Validation
+
+Main code mein kahin nahi dekha:
+
+future_return
+
+ya
+
+backtest
+
+ya
+
+factor_performance
+
+Tumhe pata hi nahi:
+
+RS 90 ka future return kya hai
+RSI 65 ka future return kya hai
+Breakout ka success rate kya hai
+
+System blindly score kar raha hai.
+
+🚨 Problem #10 (Most Important)
+
+Tum top 15 select karte ho:
+
+candidates.sort(...)
+
+fir:
+
+top 15
+
+Lekin tum compare nahi karte:
+
+Next 5 day return
+Next 10 day return
+Next 20 day return
+
+Without this:
+
+Tumhare paas stock screener hai.
+
+Trading edge nahi.
+
+Agar main STALKER v4 banata
+
+Main pehle ye karta:
+
+Remove
+News keyword sentiment
+Institutional score
+Confidence score
+
+completely.
+
+Add
+
+Har pick ke liye database me store:
+
+date
+symbol
+
+rs_score
+tech_score
+fund_score
+
+entry_price
+
+future_3d_return
+future_5d_return
+future_10d_return
+future_20d_return
+
+1000-5000 observations collect karo.
+
+Phir actual analysis:
+
+RS > 80
+average future return ?
+RS > 90 and RSI 60-70
+average future return ?
+Breakout + Volume
+average future return ?
+
+Uske baad weights nikalo.
+
+Abhi jo weights hain:
+
+0.20
+0.15
+0.12
+0.08
+
+ye market ne nahi diye.
+
+Ye humne assume kiye hain.
+
+Aur trading systems assumptions se nahi, historical expectancy se bante hain.
+
+Meri final rating
+
+Architecture: 8/10
+
+Code quality: 8.5/10
+
+Quant validity: 4/10
+
+Reason:
+
+System bahut intelligently engineered hai, but currently it is optimized for "good looking stocks", not "stocks with proven future positive expectancy."
+
+Aur wahi reason hai ki tumhe daily picks minus mein dikh rahe hain despite so many checks. The scoring engine has not yet been taught which factors actually make money.

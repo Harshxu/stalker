@@ -56,10 +56,11 @@ def calculate_targets(entry: float, stop_loss: float) -> Dict:
 
 
 def calculate_position_size(capital: float, entry: float, stop_loss: float,
-                              risk_pct: float = config.MAX_CAPITAL_RISK_PCT) -> Dict:
+                              risk_pct: float = getattr(config, "RISK_PER_TRADE_PCT", 0.02)) -> Dict:
     """
-    Position sizing: risk only 1–2% of capital per trade.
-    Returns number of shares and total capital required.
+    Volatility Adjusted Position Sizing: 
+    Position Size = Account Risk / ATR Risk (which is represented by Entry - Stop Loss).
+    High volatility stocks automatically get smaller allocation.
     """
     risk_amount  = capital * risk_pct
     risk_per_share = entry - stop_loss
@@ -67,6 +68,7 @@ def calculate_position_size(capital: float, entry: float, stop_loss: float,
     if risk_per_share <= 0:
         return {"shares": 0, "capital_needed": 0, "risk_amount": 0}
 
+    # Volatility adjustment: wider stop loss (due to higher ATR) results in fewer shares
     shares        = math.floor(risk_amount / risk_per_share)
     capital_needed = shares * entry
 
@@ -75,6 +77,7 @@ def calculate_position_size(capital: float, entry: float, stop_loss: float,
         "capital_needed": round(capital_needed, 2),
         "risk_amount":    round(risk_amount, 2),
         "risk_pct":       risk_pct * 100,
+        "volatility_adjusted": True
     }
 
 
@@ -179,3 +182,114 @@ def check_daily_loss_limit(trade_history: list) -> Dict:
         "consecutive_losses": consecutive_losses,
         "daily_pnl_pct":      round(daily_pnl_pct, 2),
     }
+
+
+# ─────────────────────────────────────────────
+# DRAWDOWN-AWARE POSITION SIZING (Phase 1 Elite)
+# ─────────────────────────────────────────────
+
+def get_account_drawdown(lookback_days: int = 30) -> float:
+    """
+    Synthesizes an equity curve from the last N days of resolved picks
+    in db_manager and returns the current drawdown from peak (as a positive %).
+
+    Returns 0.0 if insufficient data.
+    """
+    try:
+        import db_manager
+        from datetime import date, timedelta
+
+        min_date = str(date.today() - timedelta(days=lookback_days))
+        records = db_manager.get_recent_picks(lookback_days)
+
+        # Flatten all resolved picks into a time-ordered return series
+        flat_returns = []
+        for r in sorted(records, key=lambda x: x.get("date", "")):
+            picks = r.get("picks", r.get("top_picks", []))
+            rec_date = r.get("date", "")
+            for p in picks:
+                ret = p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                    else p.get("future_3d_return")
+                if ret is not None and p.get("action") == "BUY":
+                    flat_returns.append(float(ret))
+
+        if len(flat_returns) < 5:
+            return 0.0
+
+        import numpy as np
+        # Build equity curve: compound growth from 100
+        equity = 100.0
+        peak = 100.0
+        curve = []
+        for r in flat_returns:
+            equity *= (1.0 + r / 100.0)
+            peak = max(peak, equity)
+            curve.append(equity)
+
+        current_dd = (peak - equity) / peak * 100.0
+        return round(max(0.0, current_dd), 2)
+
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[RISK] Could not compute account drawdown: {e}")
+        return 0.0
+
+
+def get_drawdown_adjusted_risk(
+    base_risk_pct: float = None,
+    account_dd_pct: float = None,
+) -> Dict:
+    """
+    Applies the drawdown-aware sizing tier to the base risk per trade.
+
+    Tiers (from config.DRAWDOWN_SIZING_TIERS):
+      DD 0-5%    → full base risk (1.0x multiplier)
+      DD 5-10%   → 0.5x
+      DD 10-15%  → 0.25x
+      DD >15%    → 0.0x (stop trading)
+
+    Returns:
+        {
+          "allowed": bool,
+          "risk_pct": float (adjusted risk per trade as a decimal, e.g. 0.01),
+          "multiplier": float,
+          "account_dd_pct": float,
+          "reason": str,
+        }
+    """
+    if base_risk_pct is None:
+        base_risk_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.02)
+
+    if account_dd_pct is None:
+        account_dd_pct = get_account_drawdown()
+
+    tiers = getattr(config, "DRAWDOWN_SIZING_TIERS", [
+        {"max_dd_pct": 5.0,  "risk_multiplier": 1.0},
+        {"max_dd_pct": 10.0, "risk_multiplier": 0.5},
+        {"max_dd_pct": 15.0, "risk_multiplier": 0.25},
+        {"max_dd_pct": 999,  "risk_multiplier": 0.0},
+    ])
+
+    multiplier = 1.0
+    reason = "Normal sizing"
+
+    for tier in sorted(tiers, key=lambda t: t["max_dd_pct"]):
+        if account_dd_pct <= tier["max_dd_pct"]:
+            multiplier = tier["risk_multiplier"]
+            if multiplier == 0.0:
+                reason = f"DRAWDOWN HALT: Account DD {account_dd_pct:.1f}% exceeds 15% threshold."
+            elif multiplier < 1.0:
+                reason = f"Reduced sizing: Account DD {account_dd_pct:.1f}% → {multiplier:.0%} of base risk."
+            break
+
+    adjusted_risk = base_risk_pct * multiplier
+    allowed = multiplier > 0.0
+
+    return {
+        "allowed": allowed,
+        "risk_pct": round(adjusted_risk, 4),
+        "multiplier": multiplier,
+        "account_dd_pct": account_dd_pct,
+        "reason": reason,
+    }
+

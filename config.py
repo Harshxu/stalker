@@ -125,16 +125,80 @@ MAX_STOCK_PRICE = 10000    # ₹10,000 max per stock (user requirement)
 MIN_STOCK_PRICE = 50       # Avoid penny stocks
 
 # ─────────────────────────────────────────────
-# SCORING WEIGHTS (Total = 100)
+# PHASE 1 ELITE ARCHITECTURE: 8 ADAPTIVE REGIMES
+# Each regime defines weights for the 4 Ensemble Alpha sub-models.
+# Regime is determined by regime_engine.py
 # ─────────────────────────────────────────────
-WEIGHT_RS = 15
-WEIGHT_MARKET_STRUCTURE = 15
-WEIGHT_TECHNICAL = 15
-WEIGHT_INSTITUTIONAL = 15
-WEIGHT_FUNDAMENTALS = 20
-WEIGHT_EARNINGS = 10
-WEIGHT_SECTOR = 5
-WEIGHT_OPPORTUNITY = 5
+
+# Ensemble sub-model base weights (sum = 1.0)
+# Momentum | Quality | Institutional | Catalyst
+ENSEMBLE_WEIGHTS = {
+    "Bull_Trend":        {"momentum": 0.40, "quality": 0.20, "institutional": 0.25, "catalyst": 0.15},
+    "Bull_Expansion":    {"momentum": 0.45, "quality": 0.15, "institutional": 0.25, "catalyst": 0.15},
+    "Bull_Exhaustion":   {"momentum": 0.20, "quality": 0.35, "institutional": 0.30, "catalyst": 0.15},
+    "Neutral_Rotation":  {"momentum": 0.25, "quality": 0.30, "institutional": 0.25, "catalyst": 0.20},
+    "Neutral_Compression": {"momentum": 0.20, "quality": 0.35, "institutional": 0.25, "catalyst": 0.20},
+    "Bear_Trend":        {"momentum": 0.10, "quality": 0.45, "institutional": 0.30, "catalyst": 0.15},
+    "Bear_Panic":        {"momentum": 0.05, "quality": 0.50, "institutional": 0.35, "catalyst": 0.10},
+    "Bear_Recovery":     {"momentum": 0.25, "quality": 0.35, "institutional": 0.25, "catalyst": 0.15},
+}
+
+# Mapping from 8-state regime to legacy 3-state for backward compatibility
+REGIME_LEGACY_MAP = {
+    "Bull_Trend": "Bull",
+    "Bull_Expansion": "Bull",
+    "Bull_Exhaustion": "Neutral",
+    "Neutral_Rotation": "Neutral",
+    "Neutral_Compression": "Neutral",
+    "Bear_Trend": "Bear",
+    "Bear_Panic": "Bear",
+    "Bear_Recovery": "Neutral",
+}
+
+# Legacy REGIME_WEIGHTS kept for backward compat with old screener logic
+REGIME_WEIGHTS = {
+    "Bull": {
+        "rs": 25, "institutional": 20, "structure": 20,
+        "technical": 15, "fundamental": 5, "earnings": 5, "sector": 10, "opportunity": 0
+    },
+    "Neutral": {
+        "rs": 15, "institutional": 20, "structure": 15,
+        "technical": 15, "fundamental": 15, "earnings": 5, "sector": 10, "opportunity": 5
+    },
+    "Bear": {
+        "rs": 10, "institutional": 15, "structure": 10,
+        "technical": 10, "fundamental": 35, "earnings": 5, "sector": 5, "opportunity": 10
+    },
+    "Improving": {
+        "rs": 18, "institutional": 22, "structure": 17,
+        "technical": 15, "fundamental": 10, "earnings": 5, "sector": 10, "opportunity": 3
+    },
+    "Deteriorating": {
+        "rs": 12, "institutional": 18, "structure": 12,
+        "technical": 12, "fundamental": 25, "earnings": 5, "sector": 6, "opportunity": 10
+    }
+}
+
+WEIGHT_QUALITY_MOMENTUM = 20  # Quality Momentum feature weight
+
+# Quality Momentum sub-weights (used in legacy screener path)
+QM_WEIGHTS = {
+    "rs": 0.4,
+    "earnings_growth": 0.2,
+    "roe": 0.2,
+    "fcf_growth": 0.2
+}
+
+# ─────────────────────────────────────────────
+# DRAWDOWN-AWARE POSITION SIZING TIERS
+# When account equity drops, risk per trade shrinks automatically.
+# ─────────────────────────────────────────────
+DRAWDOWN_SIZING_TIERS = [
+    {"max_dd_pct": 5.0,  "risk_multiplier": 1.0},   # 0-5% DD → full risk
+    {"max_dd_pct": 10.0, "risk_multiplier": 0.5},   # 5-10% DD → half risk
+    {"max_dd_pct": 15.0, "risk_multiplier": 0.25},  # 10-15% DD → quarter risk
+    {"max_dd_pct": 999,  "risk_multiplier": 0.0},   # >15% DD → stop trading
+]
 
 # ─────────────────────────────────────────────
 # LIQUIDITY & TRANSACTION COSTS
@@ -170,9 +234,14 @@ IDEAL_RISK_REWARD = 2.0    # Ideal R:R ratio (1:2)
 ACCOUNT_SIZE = 1000000.0   # Default ₹10 Lakhs account size
 RISK_PER_TRADE_PCT = 0.02  # Risk max 2% of capital per trade
 MAX_CAPITAL_RISK_PCT = 0.02  # Keeping for backward compatibility
+PORTFOLIO_MAX_RISK_PCT = 0.06 # Max portfolio risk exposure
 STOP_LOSS_ATR_MULT = 2.0   # Stop loss = 2.0x ATR below entry (wider to avoid noise triggers)
 DAILY_LOSS_LIMIT_PCT = 0.03  # Stop trading after 3% daily drawdown
 STRICT_BULL_ONLY_BUY = True   # Force all picks to WATCH when market trend is Neutral or Bear
+
+# Kill Switch Settings
+KILL_SWITCH_LOSS_COUNT = 5 # Number of consecutive losses to trigger switch
+KILL_SWITCH_DAYS = 3       # Days to suspend buying (forces WATCH status)
 
 # ─────────────────────────────────────────────
 # FUNDAMENTAL THRESHOLDS

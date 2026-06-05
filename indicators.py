@@ -184,15 +184,17 @@ def relative_strength_vs_nifty(stock_df: pd.DataFrame, nifty_df: pd.DataFrame, p
 
 def calculate_multi_horizon_rs(stock_df: pd.DataFrame, nifty_df: pd.DataFrame) -> float:
     """
-    Multi-Horizon Relative Strength:
-    Combines 20-day (25%), 60-day (35%), and 120-day (40%) returns vs Nifty.
+    Multi-Horizon Relative Strength (Quality Momentum Spec):
+    Combines 20-day (40%), 60-day (40%), and RS Slope (20%).
     """
     try:
         rs_20 = relative_strength_vs_nifty(stock_df, nifty_df, period=20)
         rs_60 = relative_strength_vs_nifty(stock_df, nifty_df, period=60) if len(stock_df) >= 60 and len(nifty_df) >= 60 else rs_20
-        rs_120 = relative_strength_vs_nifty(stock_df, nifty_df, period=120) if len(stock_df) >= 120 and len(nifty_df) >= 120 else rs_60
         
-        return float(0.25 * rs_20 + 0.35 * rs_60 + 0.40 * rs_120)
+        # RS Slope (difference between 20d and 60d as a proxy for slope/acceleration)
+        rs_slope = rs_20 - (rs_60 / 3) 
+        
+        return float(0.40 * rs_20 + 0.40 * rs_60 + 0.20 * rs_slope)
     except Exception:
         return 0.0
 
@@ -220,6 +222,20 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     """
     if df is None or len(df) < 20:
         return {}
+
+    # Resample to weekly for multi-timeframe confirmation
+    try:
+        weekly_df = df.resample('W').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna()
+        weekly_close = weekly_df['Close']
+        weekly_ema20 = calculate_ema(weekly_close, 20)
+        weekly_ema50 = calculate_ema(weekly_close, 50)
+        latest_weekly_ema20 = float(weekly_ema20.iloc[-1]) if not weekly_ema20.empty else 0.0
+        latest_weekly_ema50 = float(weekly_ema50.iloc[-1]) if not weekly_ema50.empty else 0.0
+        weekly_trend_bullish = latest_weekly_ema20 > latest_weekly_ema50
+    except Exception:
+        latest_weekly_ema20 = 0.0
+        latest_weekly_ema50 = 0.0
+        weekly_trend_bullish = False
 
     close  = df["Close"]
     volume = df["Volume"]
@@ -267,7 +283,18 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     ema_bullish_slope = float(ema20.iloc[-1]) > float(ema20.iloc[-3])
     rsi_healthy      = config.RSI_MIN <= latest_rsi <= config.RSI_MAX
     volume_surge     = vol_ratio >= config.VOLUME_SURGE_RATIO
+    volume_expansion = vol_ratio >= 1.5
+    volume_dry_up    = vol_ratio <= 0.5
     gap_up           = gap_pct >= config.GAP_UP_THRESHOLD
+    
+    # Risk-Adjusted Momentum (Sharpe-like score)
+    try:
+        returns = close.pct_change().tail(20)
+        volatility = returns.std() * np.sqrt(252)
+        ret_20 = (latest_close / close.iloc[-20] - 1)
+        sharpe_like_score = float(ret_20 / volatility) if volatility > 0 else 0.0
+    except Exception:
+        sharpe_like_score = 0.0
 
     # MACD bullish: line above signal, histogram positive
     macd_bullish = (float(macd_line.iloc[-1]) > float(macd_signal.iloc[-1]) and
@@ -318,8 +345,12 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
         "ema_slope_up":   ema_bullish_slope,
         "rsi_healthy":    rsi_healthy,
         "volume_surge":   volume_surge,
+        "volume_expansion": volume_expansion,
+        "volume_dry_up":  volume_dry_up,
         "gap_up":         gap_up,
         "macd_bullish":   macd_bullish,
         "bb_squeeze":     bb_squeeze,
         "ohl_signal":     ohl_signal,
+        "weekly_trend_bullish": weekly_trend_bullish,
+        "sharpe_like_score": sharpe_like_score,
     }
