@@ -90,6 +90,20 @@ In a Bear market, a stock needs **80+ score** to even be considered. In a Bull m
 
 ---
 
+### Step 4.5 — Elite Qualification Layer 🥇 (Validation)
+*"Is this stock actually a market leader?"*
+
+To prevent buying short-term spikes, survivors are run through the **Elite Qualification Layer**:
+
+1. **Minervini Trend Template** (8 conditions checking long-term trend health). Must pass at least 6/8 conditions to survive.
+2. **VCP Detection** (Volatility Contraction Pattern checking for low-risk base consolidation). Grade varies from *None*, *Weak*, *Strong*, to *Elite*.
+3. **Leadership Score** (combines Sector/Industry ranks, Institutional activity, and a **Stability Score**). Stability measures what percentage of the last 60 days the stock was in a healthy trend structure.
+4. **Multiplier Model** — Multiplies Alpha by VCP Multiplier (1.00x - 1.07x) and Leadership Multiplier (0.95x - 1.05x). This preserves original Alpha ranking while giving true leaders the final priority.
+
+This layer feeds a **Feature Attribution Database** to track how each factor contributes to real trade outcomes (3d, 5d, 10d, 20d returns).
+
+---
+
 ### Step 5 — Reality Check 🔍
 *"Looks good on paper — but can we actually trade it?"*
 
@@ -171,6 +185,7 @@ Retail traders lose money by forcing trades in bad markets. STALKER doesn't.
 | `regime_engine.py` | Market mood classifier |
 | `market_pulse.py` | Buyer/seller balance |
 | `alpha_engine.py` | Stock scoring (4 models) |
+| `leadership_engine.py` | Elite Qualification (Minervini, VCP, Stability) |
 | `reality_check.py` | Execution friction checks |
 | `risk_manager.py` | Position sizing |
 | `portfolio_engine.py` | Portfolio construction |

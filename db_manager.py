@@ -91,6 +91,8 @@ def save_daily_picks(scan_result: Dict) -> bool:
             col = db[config.MONGO_COLLECTION_PICKS]
             col.replace_one({"date": today}, record, upsert=True)
             logger.info(f"[DB] Picks saved to MongoDB for {today}")
+            # Save feature attributions as well
+            save_feature_attributions_for_day(today, record["picks"])
             return True
         except Exception as e:
             logger.error(f"MongoDB save error: {e}")
@@ -102,6 +104,9 @@ def save_daily_picks(scan_result: Dict) -> bool:
     all_picks = all_picks[-90:]   # Keep last 90 days
     _write_json("daily_picks.json", all_picks)
     logger.info(f"[FILE] Picks saved to JSON for {today}")
+    
+    # Save feature attributions as well
+    save_feature_attributions_for_day(today, record["picks"])
     return True
 
 
@@ -539,6 +544,7 @@ def update_past_picks_returns():
                         pick[key] = round(ret, 2)
                         record_changed = True
                         logger.info(f"[TRACKER] Updated {symbol} {key} for {rec_date_str}: {ret:+.2f}%")
+                        update_attribution_returns(symbol, rec_date_str, key, round(ret, 2))
                         
         if record_changed:
             updated_records.append(record)
@@ -732,4 +738,78 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
     res["sample_size"] = len(matches)
     res["source"] = "baseline"
     return res
+
+
+# ─────────────────────────────────────────────
+# FEATURE ATTRIBUTION DATABASE
+# ─────────────────────────────────────────────
+
+def save_feature_attributions_for_day(date_str: str, picks: List[Dict]) -> bool:
+    """Creates initial feature attribution records for today's picks."""
+    db = get_db()
+    records = []
+    for p in picks:
+        # Avoid saving if it doesn't have leadership validation fields
+        if "alpha_score" not in p and "final_score" not in p:
+            continue
+        record = {
+            "symbol": p.get("symbol"),
+            "date": date_str,
+            "alpha_score": p.get("alpha_score", 0.0),
+            "leadership_score": p.get("leadership_score", 0.0),
+            "minervini_score": p.get("minervini_score", 0),
+            "vcp_score": p.get("vcp_score", 0.0),
+            "final_score": p.get("final_score", 0.0),
+            "future_3d_return": p.get("future_3d_return"),
+            "future_5d_return": p.get("future_5d_return"),
+            "future_10d_return": p.get("future_10d_return"),
+            "future_20d_return": p.get("future_20d_return")
+        }
+        records.append(record)
+
+    if not records:
+        return True
+
+    if db is not None:
+        try:
+            col = db["feature_attributions"]
+            for rec in records:
+                col.replace_one({"symbol": rec["symbol"], "date": rec["date"]}, rec, upsert=True)
+            logger.info(f"[DB] Initial feature attributions saved for {date_str}")
+        except Exception as e:
+            logger.error(f"MongoDB attribution save error: {e}")
+
+    # File fallback
+    try:
+        all_attr = _read_json("feature_attributions.json")
+        # remove existing
+        all_attr = [a for a in all_attr if not (a.get("date") == date_str and any(r["symbol"] == a.get("symbol") for r in records))]
+        all_attr.extend(records)
+        all_attr = all_attr[-500:] # keep last 500 records
+        _write_json("feature_attributions.json", all_attr)
+        logger.info(f"[FILE] Initial feature attributions saved for {date_str}")
+    except Exception as e:
+        logger.error(f"Failed to write feature attributions json: {e}")
+    return True
+
+
+def update_attribution_returns(symbol: str, date_str: str, key: str, value: float):
+    """Updates returns in feature attribution database."""
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["feature_attributions"]
+            col.update_one({"symbol": symbol, "date": date_str}, {"$set": {key: value}}, upsert=False)
+        except Exception as e:
+            logger.error(f"Failed to update Mongo attribution returns: {e}")
+
+    try:
+        all_attr = _read_json("feature_attributions.json")
+        for rec in all_attr:
+            if rec.get("symbol") == symbol and rec.get("date") == date_str:
+                rec[key] = value
+        _write_json("feature_attributions.json", all_attr)
+    except Exception as e:
+        logger.error(f"Failed to update JSON attribution returns: {e}")
+
 

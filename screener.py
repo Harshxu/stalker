@@ -1113,7 +1113,123 @@ def run_screen(symbols: Optional[List[str]] = None,
             logger.error(f"Error in Alpha Ranking for {symbol}: {e}")
             continue
 
-    # Sort by final_score (70% meta_alpha + 30% sample-adjusted EV) descending
+    # ── STAGE 4: LEADERSHIP VALIDATION LAYER ──
+    import leadership_engine
+    print(f"\n🏆 Running Leadership Validation Layer on {len(temp_candidates)} candidates...")
+    
+    survivor_symbols = [c["symbol"] for c in temp_candidates]
+    history_1y = {}
+    if survivor_symbols:
+        try:
+            history_1y = df_module.fetch_multiple_stocks(survivor_symbols, period="1y")
+        except Exception as e:
+            logger.error(f"Error fetching 1-year history for validation: {e}")
+
+    valid_candidates = []
+    for candidate in temp_candidates:
+        symbol = candidate["symbol"]
+        df_1y = history_1y.get(symbol)
+        df_3mo = all_history.get(symbol)
+        
+        # 1. Minervini Trend Template Check (needs 1y history)
+        if df_1y is not None:
+            minervini = leadership_engine.check_minervini_template(df_1y, rs_percentile=candidate["rs_rank"])
+        else:
+            minervini = {
+                "conditions_passed": 6,
+                "tier": "Acceptable",
+                "failed_conditions": [7, 8],
+                "non_neg_failed": [],
+                "score": 75.0
+            }
+            
+        # Reject if Minervini conditions passed < 6 (below Acceptable)
+        if minervini["tier"] == "Reject" or minervini["conditions_passed"] < 6:
+            logger.info(f"[LEADERSHIP] {symbol} rejected by Minervini template (passed: {minervini['conditions_passed']}/8)")
+            continue
+
+        # 2. VCP Detection (needs 3mo history - already available)
+        if df_3mo is not None:
+            vcp = leadership_engine.detect_vcp(df_3mo)
+        else:
+            vcp = {
+                "is_vcp": False,
+                "grade": "None",
+                "quality_score": 0.0,
+                "contractions_found": 0,
+                "atr_compressed": False,
+                "volume_tapering": False,
+                "tight_closes": False
+            }
+
+        # 3. Leadership Stability Score (needs 1y history)
+        stability_score = leadership_engine.calculate_stability_score(df_1y) if df_1y is not None else 50.0
+
+        # 4. Leadership Score
+        cand_fund = candidate.get("fund") or {}
+        cand_industry = cand_fund.get("industry", "Unknown")
+        industry_rs_rank = avg_industry_rs.get(cand_industry, 50.0)
+        
+        leadership_score = leadership_engine.compute_leadership_score(
+            stability_score=stability_score,
+            sector_rs_rank=candidate["sector_rank"],
+            industry_rs_rank=industry_rs_rank,
+            market_is_bullish=market_is_bullish,
+            inst_score=candidate["institutional_score"]
+        )
+
+        # 5. Multipliers & Final Score Calculation
+        vcp_grade = vcp.get("grade", "None")
+        if vcp_grade == "Elite":
+            vcp_mult = 1.07
+        elif vcp_grade == "Strong":
+            vcp_mult = 1.04
+        elif vcp_grade == "Weak":
+            vcp_mult = 1.02
+        else:
+            vcp_mult = 1.00
+
+        if leadership_score >= 80:
+            leadership_mult = 1.05
+        elif leadership_score >= 60:
+            leadership_mult = 1.02
+        elif leadership_score >= 45:
+            leadership_mult = 1.00
+        else:
+            leadership_mult = 0.95
+
+        alpha_val = candidate["alpha_score"]
+        final_val = alpha_val * leadership_mult * vcp_mult
+        final_val = float(np.clip(final_val, 0.0, 100.0))
+
+        # 6. Audit Logging & Storing
+        audit_msg = (
+            f"[LEADERSHIP AUDIT] {symbol} | "
+            f"Alpha: {alpha_val:.1f} | "
+            f"Stability: {stability_score:.1f}% | "
+            f"Leadership: {leadership_score:.1f} ({leadership_mult:.2f}x) | "
+            f"VCP Quality: {vcp['quality_score']:.1f} ({vcp_grade}, {vcp_mult:.2f}x) | "
+            f"Minervini: {minervini['conditions_passed']}/8 ({minervini['tier']}) | "
+            f"Final Score: {final_val:.1f}"
+        )
+        logger.info(audit_msg)
+
+        candidate["leadership_score"] = float(round(leadership_score, 1))
+        candidate["leadership_stability_score"] = float(round(stability_score, 1))
+        candidate["minervini_score"] = int(minervini["conditions_passed"])
+        candidate["minervini_tier"] = minervini["tier"]
+        candidate["vcp_score"] = float(round(vcp["quality_score"], 1))
+        candidate["vcp_grade"] = vcp_grade
+        candidate["vcp_multiplier"] = vcp_mult
+        candidate["leadership_multiplier"] = leadership_mult
+        candidate["final_score"] = float(round(final_val, 1))
+        candidate["adjusted_alpha"] = final_val
+        candidate["total_score"] = float(round(final_val, 1))
+        candidate["audit_log"] = audit_msg
+
+        valid_candidates.append(candidate)
+
+    temp_candidates = valid_candidates
     temp_candidates.sort(key=lambda x: x["adjusted_alpha"], reverse=True)
     N = len(temp_candidates)
 

@@ -280,7 +280,20 @@ for d in [DATA_DIR, REPORTS_DIR, LOGS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # ─────────────────────────────────────────────
+# LEADERSHIP VALIDATION LAYER
+# ─────────────────────────────────────────────
+MINERVINI_MIN_CONDITIONS = 6          # Reject if fewer than 6 pass
+MINERVINI_NONNEG_CONDITIONS = [1, 2, 5, 6]  # Non-negotiable conditions (must always pass)
+VCP_MIN_QUALITY_SCORE = 40.0         # Below this, not qualified
+LEADERSHIP_FINAL_WEIGHTS = {
+    "alpha": 0.70,
+    "leadership": 0.20,
+    "vcp": 0.10
+}
+
+# ─────────────────────────────────────────────
 # DASHBOARD SERVER
 # ─────────────────────────────────────────────
 DASHBOARD_PORT = int(os.getenv("PORT", 8000))
+
 

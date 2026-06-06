@@ -15,6 +15,12 @@ def calculate_ema(series: pd.Series, period: int) -> pd.Series:
     return series.ewm(span=period, adjust=False).mean()
 
 
+def calculate_sma(series: pd.Series, period: int) -> pd.Series:
+    """Simple Moving Average."""
+    return series.rolling(window=period).mean()
+
+
+
 def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Relative Strength Index (RSI)."""
     delta = series.diff()
