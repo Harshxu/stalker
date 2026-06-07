@@ -1117,6 +1117,18 @@ def run_screen(symbols: Optional[List[str]] = None,
     import leadership_engine
     print(f"\n🏆 Running Leadership Validation Layer on {len(temp_candidates)} candidates...")
     
+    # Load optimized parameter weights from Adaptive Factor Learner if available
+    opt_weights = {}
+    weights_path = os.path.join(config.DATA_DIR, "optimized_weights_latest.json")
+    if os.path.exists(weights_path):
+        try:
+            with open(weights_path) as f:
+                opt_data = json.load(f)
+            opt_weights = opt_data.get("weights", {})
+            print(f"   Loaded optimized parameter weights ({opt_data.get('version', 'unknown')}) trained on {opt_data.get('trained_on', 'unknown')[:10]}")
+        except Exception as e:
+            logger.error(f"Failed to load optimized weights: {e}")
+
     survivor_symbols = [c["symbol"] for c in temp_candidates]
     history_1y = {}
     if survivor_symbols:
@@ -1181,22 +1193,22 @@ def run_screen(symbols: Optional[List[str]] = None,
         # 5. Multipliers & Final Score Calculation
         vcp_grade = vcp.get("grade", "None")
         if vcp_grade == "Elite":
-            vcp_mult = 1.07
+            vcp_mult = 1.0 + opt_weights.get("vcp_elite_bonus", 0.07)
         elif vcp_grade == "Strong":
-            vcp_mult = 1.04
+            vcp_mult = 1.0 + opt_weights.get("vcp_strong_bonus", 0.04)
         elif vcp_grade == "Weak":
-            vcp_mult = 1.02
+            vcp_mult = 1.0 + opt_weights.get("vcp_weak_bonus", 0.02)
         else:
-            vcp_mult = 1.00
+            vcp_mult = 1.0
 
         if leadership_score >= 80:
-            leadership_mult = 1.05
+            leadership_mult = 1.0 + opt_weights.get("lead_elite_bonus", 0.05)
         elif leadership_score >= 60:
-            leadership_mult = 1.02
+            leadership_mult = 1.0 + opt_weights.get("lead_strong_bonus", 0.02)
         elif leadership_score >= 45:
-            leadership_mult = 1.00
+            leadership_mult = 1.0
         else:
-            leadership_mult = 0.95
+            leadership_mult = 1.0 - opt_weights.get("lead_low_penalty", 0.05)
 
         alpha_val = candidate["alpha_score"]
         final_val = alpha_val * leadership_mult * vcp_mult
