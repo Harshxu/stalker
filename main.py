@@ -38,7 +38,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler(log_file),
+        logging.FileHandler(log_file, encoding="utf-8"),
         logging.StreamHandler(sys.stdout),
     ]
 )
@@ -396,8 +396,6 @@ def run_morning_scan():
                 _today_scan_result = result
                 picks = result.get("top_picks", [])
                 _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
-                if not picks:
-                    raise ValueError("Emergency screener returned zero picks")
                 db_manager.save_daily_picks(result)
                 scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
                 with open(scan_path, "w") as f:
@@ -867,22 +865,39 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
         else:
             updated_note = ""
 
-        # ── SAFETY GUARD: Never send a blank picks email ──────────────────
-        if not picks:
+        # ── SAFETY GUARD: Never send a blank picks email unless the scan actually ran and returned 0 picks ──
+        is_valid_scan = isinstance(scan_result, dict) and scan_result.get("scanned", 0) > 0
+        if not is_valid_scan:
             logger.critical(
-                "[MORNING EMAIL] Blocked: picks list is EMPTY. "
-                "Pre-market analysis likely failed. Sending admin-only alert."
+                "[MORNING EMAIL] Blocked: scan_result is invalid, empty, or scanned count is 0. "
+                "Pre-market analysis likely failed/crashed. Sending admin-only alert."
             )
             _send_admin_alert(
-                "Morning Email Aborted — Zero Picks Available",
-                f"scan_result keys: {list(scan_result.keys())}. "
-                f"market_trend={market}. This means the 7:00 AM screener returned no stocks."
+                "Morning Email Aborted — Scan Result Invalid",
+                f"scan_result keys: {list(scan_result.keys()) if isinstance(scan_result, dict) else 'Not a dict'}. "
+                f"market_trend={market}."
             )
             return
 
         # Check if there are any BUY picks in today's selection
-        has_buy_picks = any(p.get('action') == "BUY" for p in picks)
-        if not has_buy_picks:
+        has_buy_picks = any(p.get('action') == "BUY" for p in picks) if picks else False
+        if not picks:
+            subject = f"🛡️ STALKER Capital Preservation Mode — {date_str} (Trend: {market})"
+            warning_banner = """
+                    <div style="background-color: #fef3c7; border-left: 6px solid #d97706; padding: 16px; border-radius: 8px; margin-bottom: 24px; text-align: left;">
+                        <strong style="color: #b45309; font-size: 15px; display: block; margin-bottom: 6px;">🛡️ SYSTEM STATUS: CAPITAL PRESERVATION ACTIVE</strong>
+                        <p style="margin: 0; font-size: 13px; color: #78350f; line-height: 1.5;">
+                            Our system scanned the entire market today, but <strong>zero stocks</strong> met our strict risk-reward and multi-factor validation criteria (VABS, Minervini, VCP, Leadership). 
+                            All scoring algorithms are active. <strong>No trades are recommended today.</strong> Standing aside and preserving capital is the mark of a professional trader.
+                        </p>
+                    </div>
+            """
+            strategy_note = """
+                    <div style="margin-top: 30px; padding: 15px; background-color: #fffbef; border-left: 4px solid #d97706; border-radius: 4px; font-size: 13px; color: #78350f; line-height: 1.5;">
+                        <strong>🛡️ Capital Protection Shield:</strong> During sideways, choppy, or deteriorating markets (like <strong>{market}</strong>), the best action is no action. The algorithm will automatically resume buy alerts when conditions turn favorable.
+                    </div>
+            """.format(market=market)
+        elif not has_buy_picks:
             subject = f"⚠️ STALKER Watchlist Only (No BUY) — {date_str} (Trend: {market})"
             warning_banner = """
                     <div style="background-color: #fee2e2; border-left: 6px solid #dc2626; padding: 16px; border-radius: 8px; margin-bottom: 24px; text-align: left;">
@@ -910,39 +925,49 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
         
         # Build premium HTML email body
         rows_html = ""
-        for i, p in enumerate(picks, 1):
-            action = p.get('action', '')
-            action_color = "#16a34a" if action == "BUY" else "#d97706" if action == "WATCH" else "#dc2626"
-            action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb" if action == "WATCH" else "#fef2f2"
-            
-            name = p.get('name', p.get('symbol', ''))
-            price = p.get('current_price')
-            price_str = f"₹{price:,.2f}" if price is not None and price > 0 else "—"
-            
-            target = p.get('target_2')
-            target_str = f"₹{target:,.2f}" if target is not None and target > 0 else "—"
-            
-            stop_loss = p.get('stop_loss')
-            stop_loss_str = f"₹{stop_loss:,.2f}" if stop_loss is not None and stop_loss > 0 else "—"
-            
-            risk = p.get('risk_profile') if p.get('risk_profile') is not None else 'Medium'
-            score = p.get('total_score') if p.get('total_score') is not None else 0
-            
-            rows_html += f"""
+        if not picks:
+            rows_html = """
             <tr style="border-bottom: 1px solid #e5e7eb;">
-                <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
-                <td style="padding: 12px 8px; text-align: center;">
-                    <span style="display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
-                        {action}
-                    </span>
+                <td colspan="7" style="padding: 24px; text-align: center; color: #6b7280; font-style: italic; font-size: 14px; background-color: #fafafa;">
+                    🛡️ No stocks qualified under our strict Alpha & Risk validation criteria today. 
+                    Preserving capital is the best trade in this market regime.
                 </td>
-                <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">{price_str}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">{target_str}</td>
-                <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">{stop_loss_str}</td>
-                <td style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
-                <td style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
             </tr>
             """
+        else:
+            for i, p in enumerate(picks, 1):
+                action = p.get('action', '')
+                action_color = "#16a34a" if action == "BUY" else "#d97706" if action == "WATCH" else "#dc2626"
+                action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb" if action == "WATCH" else "#fef2f2"
+                
+                name = p.get('name', p.get('symbol', ''))
+                price = p.get('current_price')
+                price_str = f"₹{price:,.2f}" if price is not None and price > 0 else "—"
+                
+                target = p.get('target_2')
+                target_str = f"₹{target:,.2f}" if target is not None and target > 0 else "—"
+                
+                stop_loss = p.get('stop_loss')
+                stop_loss_str = f"₹{stop_loss:,.2f}" if stop_loss is not None and stop_loss > 0 else "—"
+                
+                risk = p.get('risk_profile') if p.get('risk_profile') is not None else 'Medium'
+                score = p.get('total_score') if p.get('total_score') is not None else 0
+                
+                rows_html += f"""
+                <tr style="border-bottom: 1px solid #e5e7eb;">
+                    <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
+                    <td style="padding: 12px 8px; text-align: center;">
+                        <span style="display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
+                            {action}
+                        </span>
+                    </td>
+                    <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">{price_str}</td>
+                    <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">{target_str}</td>
+                    <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">{stop_loss_str}</td>
+                    <td style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
+                    <td style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
+                </tr>
+                """
             
         html_body = f"""
         <html>
