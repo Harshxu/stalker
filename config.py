@@ -237,7 +237,7 @@ MAX_CAPITAL_RISK_PCT = 0.02  # Keeping for backward compatibility
 PORTFOLIO_MAX_RISK_PCT = 0.06 # Max portfolio risk exposure
 STOP_LOSS_ATR_MULT = 2.0   # Stop loss = 2.0x ATR below entry (wider to avoid noise triggers)
 DAILY_LOSS_LIMIT_PCT = 0.03  # Stop trading after 3% daily drawdown
-STRICT_BULL_ONLY_BUY = True   # Force all picks to WATCH when market trend is Neutral or Bear
+STRICT_BULL_ONLY_BUY = False   # Force all picks to WATCH when market trend is Neutral or Bear (set to False to allow top leadership picks in Neutral/Improving regimes)
 
 # Kill Switch Settings
 KILL_SWITCH_LOSS_COUNT = 5 # Number of consecutive losses to trigger switch
@@ -282,7 +282,7 @@ for d in [DATA_DIR, REPORTS_DIR, LOGS_DIR]:
 # ─────────────────────────────────────────────
 # LEADERSHIP VALIDATION LAYER
 # ─────────────────────────────────────────────
-MINERVINI_MIN_CONDITIONS = 6          # Reject if fewer than 6 pass
+MINERVINI_MIN_CONDITIONS = 5          # Reject if fewer than 5 pass (relaxed from 6 to avoid being too strict initially)
 MINERVINI_NONNEG_CONDITIONS = [1, 2, 5, 6]  # Non-negotiable conditions (must always pass)
 VCP_MIN_QUALITY_SCORE = 40.0         # Below this, not qualified
 LEADERSHIP_FINAL_WEIGHTS = {

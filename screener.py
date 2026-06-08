@@ -726,9 +726,14 @@ def run_screen(symbols: Optional[List[str]] = None,
             if check_circuit_lock(df_hist):
                 continue
                 
-            # Hard Risk Gating
+            # Calibrated Risk Gating: Allow high-performing leaders to pass safety filters
             risk_score, max_dd, atr_pct = evaluate_risk_profile(df_hist, indic)
-            risk_threshold = 4.2 if market_regime_legacy in ["Neutral", "Bear", "Deteriorating"] else 5.0
+            if market_regime_legacy in ["Bear", "Deteriorating"]:
+                risk_threshold = 5.2
+            elif market_regime_legacy in ["Neutral", "Improving"]:
+                risk_threshold = 6.2
+            else: # Bull
+                risk_threshold = 7.2
             if risk_score > risk_threshold:  # Gating threshold
                 continue
                 
@@ -1250,14 +1255,14 @@ def run_screen(symbols: Optional[List[str]] = None,
         rank_in_universe = idx + 1
         adj_alpha = stock["adjusted_alpha"]
 
-        # Enforce dual quality-percentile filters
+        # Enforce dual quality-percentile filters (calibrated to return up to top 15% of candidates instead of being too restrictive)
         passes_dual_filter = False
         if market_regime_legacy == "Bull":
-            passes_dual_filter = (adj_alpha >= 70.0) and (rank_in_universe <= max(1, int(0.10 * N)))
+            passes_dual_filter = (adj_alpha >= 70.0) and (rank_in_universe <= max(5, int(0.25 * N)))
         elif market_regime_legacy in ["Improving", "Neutral"]:
-            passes_dual_filter = (adj_alpha >= 75.0) and (rank_in_universe <= max(1, int(0.05 * N)))
+            passes_dual_filter = (adj_alpha >= 75.0) and (rank_in_universe <= max(3, int(0.15 * N)))
         else:  # Bear or Deteriorating
-            passes_dual_filter = (adj_alpha >= 80.0) and (rank_in_universe <= max(1, int(0.03 * N)))
+            passes_dual_filter = (adj_alpha >= 80.0) and (rank_in_universe <= max(2, int(0.10 * N)))
 
         # Calculate stop loss, targets & check R:R ratio
         entry_price = stock["current_price"]
