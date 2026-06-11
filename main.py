@@ -4,15 +4,17 @@ STALKER - Main Orchestrator
 Runs the morning scan, records prices, generates reports.
 Scheduled automatically via Windows Task Scheduler.
 """
-# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
+import sys
+import io
+import os
+
+# Force UTF-8 output on Windows
 try:
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 except Exception:
-    pass  # In-process / thread context — stdout already safe
+    pass
 
-import os
-import sys
 import json
 import logging
 import schedule

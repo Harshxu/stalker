@@ -13,6 +13,7 @@ class StyledPDF(FPDF):
         
     def header(self):
         if self.page_no() > 1:
+            self.set_x(self.l_margin)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(130, 130, 130)
             self.cell(0, 8, "STALKER - System Documentation v3.0", align="C")
@@ -51,6 +52,7 @@ class StyledPDF(FPDF):
         self.set_font("Helvetica", "I", 10)
         self.set_text_color(150, 150, 150)
         self.cell(0, 8, "Last Updated: June 3, 2026", align="C")
+        self.add_page()
 
     def section_heading(self, text, level=1):
         self.ln(4)

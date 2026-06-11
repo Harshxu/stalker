@@ -692,6 +692,90 @@ def run_screen(symbols: Optional[List[str]] = None,
             "downgrade_buy": False, "interpretation": "Pulse unavailable — neutral assumed."
         }
 
+    # ── PRE-COMPUTE UNIVERSE METRICS AND CALCULATE UNIVERSE PERCENTILES ──
+    print(f"\n📊 Pre-computing indicators and fundamentals across the entire universe...")
+    universe_data = {}
+    
+    for symbol in symbols:
+        df_hist = all_history.get(symbol)
+        if df_hist is None or len(df_hist) < 20:
+            continue
+        try:
+            indic = ind.compute_all_indicators(df_hist, nifty_df)
+            if not indic:
+                continue
+            fund = df_module.fetch_fundamentals(symbol)
+            _, _, avg_value = evaluate_liquidity(df_hist)
+            universe_data[symbol] = {
+                "df_hist": df_hist,
+                "indic": indic,
+                "fund": fund,
+                "avg_value": avg_value
+            }
+        except Exception as e:
+            logger.debug(f"Failed to pre-compute data for {symbol}: {e}")
+            continue
+
+    if not universe_data:
+        print("   ❌ No symbols with valid data found in universe.")
+        return {
+            "date":           datetime.now().strftime("%Y-%m-%d"),
+            "scan_time":      datetime.now().strftime("%H:%M:%S"),
+            "market_trend":   market_regime_8.lower(),
+            "market_trend_legacy": market_regime_legacy.lower(),
+            "market_bullish": market_is_bullish,
+            "market_risk_on": market_is_risk_on,
+            "market_breadth": round(market_breadth, 2),
+            "market_breadth_50": round(market_breadth_50, 2),
+            "market_breadth_200": round(market_breadth_200, 2),
+            "regime_data":    regime_data,
+            "sector_trends":  sector_trends,
+            "account_drawdown_pct": account_dd,
+            "top_picks":      [],
+            "scanned":        len(symbols),
+            "qualified":      0,
+            "elapsed_sec":    (datetime.now() - start_time).seconds,
+        }
+
+    # ── COMPUTE PERCENTILE MAPS ACROSS UNIVERSE ──
+    raw_rs_map = {sym: float(data["indic"].get("rs_vs_nifty", 0.0)) for sym, data in universe_data.items()}
+    raw_vol_ratio_map = {sym: float(data["indic"].get("volume_ratio", 1.0)) for sym, data in universe_data.items()}
+    raw_cmf_map = {sym: float(data["indic"].get("cmf", 0.0)) for sym, data in universe_data.items()}
+    raw_roe_map = {sym: float(data["fund"].get("roe") or 0.0) for sym, data in universe_data.items()}
+    raw_profit_growth_map = {sym: float(data["fund"].get("profit_growth") or 0.0) for sym, data in universe_data.items()}
+    raw_revenue_growth_map = {sym: float(data["fund"].get("revenue_growth") or 0.0) for sym, data in universe_data.items()}
+    
+    raw_sales_growth_map = {}
+    raw_margin_expansion_map = {}
+    raw_earnings_revision_map = {}
+    raw_roe_trend_map = {}
+    raw_fcf_growth_map = {}
+    raw_earnings_surprise_map = {}
+    raw_turnover_map = {sym: float(data["avg_value"]) for sym, data in universe_data.items()}
+    
+    for sym, data in universe_data.items():
+        f = data["fund"]
+        raw_sales_growth_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_revs", [])))
+        raw_margin_expansion_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_margins", [])))
+        raw_earnings_revision_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_eps", [])))
+        raw_roe_trend_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_profits", [])))
+        raw_fcf_growth_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_fcf", [])))
+        raw_earnings_surprise_map[sym] = float(f.get("earnings_surprise") or 0.0)
+        
+    rs_percentiles = compute_percentiles(raw_rs_map)
+    volume_percentiles = compute_percentiles(raw_vol_ratio_map)
+    cmf_percentiles = compute_percentiles(raw_cmf_map)
+    roe_percentiles = compute_percentiles(raw_roe_map)
+    profit_growth_percentiles = compute_percentiles(raw_profit_growth_map)
+    revenue_growth_percentiles = compute_percentiles(raw_revenue_growth_map)
+    sales_growth_percentiles = compute_percentiles(raw_sales_growth_map)
+    margin_expansion_percentiles = compute_percentiles(raw_margin_expansion_map)
+    earnings_revision_percentiles = compute_percentiles(raw_earnings_revision_map)
+    roe_trend_percentiles = compute_percentiles(raw_roe_trend_map)
+    fcf_growth_percentiles = compute_percentiles(raw_fcf_growth_map)
+    earnings_surprise_percentiles = compute_percentiles(raw_earnings_surprise_map)
+    turnover_percentiles = compute_percentiles(raw_turnover_map)
+
     # ─────────────────────────────────────────────
     # STAGE 1: Hard Safety Gating Filter
     # ─────────────────────────────────────────────
@@ -699,18 +783,18 @@ def run_screen(symbols: Optional[List[str]] = None,
     survivors = []
     
     for symbol in symbols:
-        df_hist = all_history.get(symbol)
-        if df_hist is None or len(df_hist) < 20:
+        if symbol not in universe_data:
             continue
             
+        data = universe_data[symbol]
+        df_hist = data["df_hist"]
+        indic = data["indic"]
+        fund = data["fund"]
+        avg_value = data["avg_value"]
+        
         try:
-            # Compute technical indicators
-            indic = ind.compute_all_indicators(df_hist, nifty_df)
-            if not indic:
-                continue
-                
             # Hard Liquidity Gating
-            is_liquid, avg_vol, avg_value = evaluate_liquidity(df_hist)
+            is_liquid, avg_vol, _ = evaluate_liquidity(df_hist)
             if not is_liquid:
                 continue
                 
@@ -737,8 +821,7 @@ def run_screen(symbols: Optional[List[str]] = None,
             if risk_score > risk_threshold:  # Gating threshold
                 continue
                 
-            # Fundamentals and news (pre-fetched/cached)
-            fund = df_module.fetch_fundamentals(symbol)
+            # News (pre-fetched/cached)
             news = df_module.fetch_news_signals(symbol)
             
             # Hard Data Quality Gating
@@ -793,46 +876,6 @@ def run_screen(symbols: Optional[List[str]] = None,
             "qualified":      0,
             "elapsed_sec":    (datetime.now() - start_time).seconds,
         }
-
-    # ── COMPUTE PERCENTILE MAPS ACROSS SURVIVORS ──
-    raw_rs_map = {item["symbol"]: float(item["indic"].get("rs_vs_nifty", 0.0)) for item in survivors}
-    raw_vol_ratio_map = {item["symbol"]: float(item["indic"].get("volume_ratio", 1.0)) for item in survivors}
-    raw_cmf_map = {item["symbol"]: float(item["indic"].get("cmf", 0.0)) for item in survivors}
-    raw_roe_map = {item["symbol"]: float(item["fund"].get("roe") or 0.0) for item in survivors}
-    raw_profit_growth_map = {item["symbol"]: float(item["fund"].get("profit_growth") or 0.0) for item in survivors}
-    raw_revenue_growth_map = {item["symbol"]: float(item["fund"].get("revenue_growth") or 0.0) for item in survivors}
-    
-    raw_sales_growth_map = {}
-    raw_margin_expansion_map = {}
-    raw_earnings_revision_map = {}
-    raw_roe_trend_map = {}
-    raw_fcf_growth_map = {}
-    raw_earnings_surprise_map = {}
-    raw_turnover_map = {item["symbol"]: float(item["avg_value"]) for item in survivors}
-    
-    for item in survivors:
-        sym = item["symbol"]
-        f = item["fund"]
-        raw_sales_growth_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_revs", [])))
-        raw_margin_expansion_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_margins", [])))
-        raw_earnings_revision_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_eps", [])))
-        raw_roe_trend_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_profits", [])))
-        raw_fcf_growth_map[sym] = float(fund_module.compute_growth_trend_metric(f.get("quarterly_fcf", [])))
-        raw_earnings_surprise_map[sym] = float(f.get("earnings_surprise") or 0.0)
-        
-    rs_percentiles = compute_percentiles(raw_rs_map)
-    volume_percentiles = compute_percentiles(raw_vol_ratio_map)
-    cmf_percentiles = compute_percentiles(raw_cmf_map)
-    roe_percentiles = compute_percentiles(raw_roe_map)
-    profit_growth_percentiles = compute_percentiles(raw_profit_growth_map)
-    revenue_growth_percentiles = compute_percentiles(raw_revenue_growth_map)
-    sales_growth_percentiles = compute_percentiles(raw_sales_growth_map)
-    margin_expansion_percentiles = compute_percentiles(raw_margin_expansion_map)
-    earnings_revision_percentiles = compute_percentiles(raw_earnings_revision_map)
-    roe_trend_percentiles = compute_percentiles(raw_roe_trend_map)
-    fcf_growth_percentiles = compute_percentiles(raw_fcf_growth_map)
-    earnings_surprise_percentiles = compute_percentiles(raw_earnings_surprise_map)
-    turnover_percentiles = compute_percentiles(raw_turnover_map)
 
     # ── SECTOR & INDUSTRY MOMENTUM LEADERSHIP ──
     sector_rs_scores = {}
@@ -1160,9 +1203,10 @@ def run_screen(symbols: Optional[List[str]] = None,
                 "score": 75.0
             }
             
-        # Reject if Minervini conditions passed < 6 (below Acceptable)
-        if minervini["tier"] == "Reject" or minervini["conditions_passed"] < 6:
-            logger.info(f"[LEADERSHIP] {symbol} rejected by Minervini template (passed: {minervini['conditions_passed']}/8)")
+        # Reject if Minervini conditions passed < MINERVINI_MIN_CONDITIONS
+        min_minervini = getattr(config, "MINERVINI_MIN_CONDITIONS", 6)
+        if minervini["tier"] == "Reject" or minervini["conditions_passed"] < min_minervini:
+            logger.info(f"[LEADERSHIP] {symbol} rejected by Minervini template (passed: {minervini['conditions_passed']}/8, min required: {min_minervini})")
             continue
 
         # 2. VCP Detection (needs 3mo history - already available)
@@ -1258,11 +1302,11 @@ def run_screen(symbols: Optional[List[str]] = None,
         # Enforce dual quality-percentile filters (calibrated to return up to top 15% of candidates instead of being too restrictive)
         passes_dual_filter = False
         if market_regime_legacy == "Bull":
-            passes_dual_filter = (adj_alpha >= 70.0) and (rank_in_universe <= max(5, int(0.25 * N)))
+            passes_dual_filter = (adj_alpha >= 65.0) and (rank_in_universe <= max(5, int(0.25 * N)))
         elif market_regime_legacy in ["Improving", "Neutral"]:
-            passes_dual_filter = (adj_alpha >= 75.0) and (rank_in_universe <= max(3, int(0.15 * N)))
+            passes_dual_filter = (adj_alpha >= 65.0) and (rank_in_universe <= max(3, int(0.15 * N)))
         else:  # Bear or Deteriorating
-            passes_dual_filter = (adj_alpha >= 80.0) and (rank_in_universe <= max(2, int(0.10 * N)))
+            passes_dual_filter = (adj_alpha >= 70.0) and (rank_in_universe <= max(2, int(0.10 * N)))
 
         # Calculate stop loss, targets & check R:R ratio
         entry_price = stock["current_price"]
