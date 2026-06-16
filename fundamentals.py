@@ -19,9 +19,10 @@ def compute_growth_trend_metric(y: List[float]) -> float:
     - Magnitude: Regression slope normalized by mean absolute value of the series.
     - Consistency: Pearson correlation coefficient between quarters and values.
     - Acceleration: Regression slope fitted to quarter-on-quarter changes.
+    Returns np.nan if there is insufficient data.
     """
-    if len(y) < 2:
-        return 0.0
+    if y is None or len(y) < 2:
+        return np.nan
     try:
         y_arr = np.array(y, dtype=float)
         mean_val = np.mean(np.abs(y_arr))
@@ -50,7 +51,7 @@ def compute_growth_trend_metric(y: List[float]) -> float:
         # Composite score
         return float(0.5 * relative_slope + 0.3 * consistency + 0.2 * acceleration)
     except Exception:
-        return 0.0
+        return np.nan
 
 
 def score_fundamentals(fund: Dict, roe_rank: float = 50.0, profit_growth_rank: float = 50.0,

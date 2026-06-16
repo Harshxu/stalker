@@ -80,6 +80,7 @@ def classify_regime(
     breadth_200: float,
     prev_breadth_50: float = 0.5,
     all_history: Optional[dict] = None,
+    ad_ratio: Optional[float] = None,
 ) -> Tuple[str, bool, dict]:
     """
     Classifies the current market into one of 8 adaptive regimes.
@@ -90,6 +91,7 @@ def classify_regime(
         breadth_200: Fraction of universe stocks trading > 200 EMA today
         prev_breadth_50: Fraction above 50 EMA on the previous day
         all_history: Dict of {symbol: df} for AD ratio calculation
+        ad_ratio: Optional precalculated advance/decline ratio
 
     Returns:
         (regime_name: str, is_risk_on: bool, regime_data: dict)
@@ -103,7 +105,9 @@ def classify_regime(
         ema200 = float(nifty_df["Close"].rolling(window=200).mean().iloc[-1]) if len(nifty_df) >= 200 else ema50
         realized_vol = get_realized_volatility(nifty_df)
         ema20_slope = get_ema20_slope(nifty_df)
-        ad_ratio = get_ad_ratio(all_history) if all_history else 1.0
+        
+        if ad_ratio is None:
+            ad_ratio = get_ad_ratio(all_history) if all_history else 1.0
 
         above_ema50 = close > ema50
         above_ema200 = close > ema200

@@ -94,45 +94,48 @@ class PortfolioEngine:
         Args:
             stock: Candidate stock dict (must have 'sector', 'fund' with 'industry')
             df_hist: OHLCV DataFrame for correlation checks
-            action: 'BUY' or 'WATCH' (heat check only applies to BUY)
+            action: 'BUY' or 'WATCH' (constraints and correlation checks only apply to BUY)
 
         Returns:
             (accept: bool, reject_reason: str)
         """
+        # Constraints and correlation checks ONLY apply to BUY picks
+        if action != "BUY":
+            return True, ""
+
         symbol = stock.get("symbol", "?")
         sector = stock.get("sector", "Unknown")
         industry = (stock.get("fund") or {}).get("industry", "Unknown")
 
-        # 1. Sector cap
-        if self.sector_counts.get(sector, 0) >= 2:
-            return False, f"Sector cap: already 2 picks in {sector}"
+        # 1. Sector cap (Relaxed for short-term trading)
+        if self.sector_counts.get(sector, 0) >= 3:
+            return False, f"Sector cap: already 3 picks in {sector}"
 
-        # 2. Industry cap
-        if self.industry_counts.get(industry, 0) >= 1:
-            return False, f"Industry cap: already 1 pick in {industry}"
+        # 2. Industry cap (Relaxed for short-term trading)
+        if self.industry_counts.get(industry, 0) >= 2:
+            return False, f"Industry cap: already 2 picks in {industry}"
 
-        # 3. Heat cap (only for BUY)
-        if action == "BUY":
-            projected_heat = self.active_heat + self.risk_per_trade_pct
-            if projected_heat > self.heat_limit_pct:
-                return (
-                    False,
-                    f"Heat cap: {projected_heat:.1f}% would exceed {self.heat_limit_pct:.1f}% limit",
-                )
+        # 3. Heat cap
+        projected_heat = self.active_heat + self.risk_per_trade_pct
+        if projected_heat > self.heat_limit_pct:
+            return (
+                False,
+                f"Heat cap: {projected_heat:.1f}% would exceed {self.heat_limit_pct:.1f}% limit",
+            )
 
-        # 4. Avg pairwise correlation (if adding this stock)
+        # 4. Avg pairwise correlation (Relaxed for short-term momentum trades)
         if df_hist is not None and len(self.dfs) >= 1:
             temp_dfs = self.dfs + [df_hist]
             avg_corr = self._pairwise_corr(temp_dfs)
-            if avg_corr > 0.60:
-                return False, f"Correlation: avg pairwise r={avg_corr:.2f} > 0.60"
+            if avg_corr > 0.75:
+                return False, f"Correlation: avg pairwise r={avg_corr:.2f} > 0.75"
 
-        # 5. Single-stock correlation vs each existing position
+        # 5. Single-stock correlation vs each existing position (Relaxed for short-term momentum trades)
         if df_hist is not None:
             for existing_df in self.dfs:
                 r = self._single_corr(df_hist, existing_df)
-                if r > 0.80:
-                    return False, f"Correlation: r={r:.2f} > 0.80 vs an existing position"
+                if r > 0.88:
+                    return False, f"Correlation: r={r:.2f} > 0.88 vs an existing position"
 
         return True, ""
 
@@ -143,15 +146,16 @@ class PortfolioEngine:
         action: str = "BUY",
     ) -> None:
         """Adds a stock to the portfolio and updates internal state."""
-        sector = stock.get("sector", "Unknown")
-        industry = (stock.get("fund") or {}).get("industry", "Unknown")
-
         self.portfolio.append(stock)
-        if df_hist is not None:
-            self.dfs.append(df_hist)
-        self.sector_counts[sector] = self.sector_counts.get(sector, 0) + 1
-        self.industry_counts[industry] = self.industry_counts.get(industry, 0) + 1
+        
+        # Only update constraints, dfs, and heat for BUY picks
         if action == "BUY":
+            sector = stock.get("sector", "Unknown")
+            industry = (stock.get("fund") or {}).get("industry", "Unknown")
+            if df_hist is not None:
+                self.dfs.append(df_hist)
+            self.sector_counts[sector] = self.sector_counts.get(sector, 0) + 1
+            self.industry_counts[industry] = self.industry_counts.get(industry, 0) + 1
             self.active_heat += self.risk_per_trade_pct
 
     def size(self) -> int:

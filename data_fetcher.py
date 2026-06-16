@@ -409,12 +409,11 @@ FUNDAMENTALS_CACHE_FILE = os.path.join(config.DATA_DIR, "fundamentals_cache.json
 
 def fetch_fundamentals(symbol: str) -> Dict:
     """
-    Fetch fundamental data with a local JSON cache layer + MongoDB persistent cache layer
-    to avoid slow yfinance network calls and survive Render container restarts.
+    Fetch fundamental data with a local JSON cache layer to avoid slow yfinance network calls.
     """
     global _fundamentals_cache
     
-    # 1. Lazy load cache from local JSON file (as memory baseline)
+    # Lazy load cache from file
     if _fundamentals_cache is None:
         if os.path.exists(FUNDAMENTALS_CACHE_FILE):
             try:
@@ -424,41 +423,18 @@ def fetch_fundamentals(symbol: str) -> Dict:
                 _fundamentals_cache = {}
         else:
             _fundamentals_cache = {}
-
-    # 2. Check local memory cache first
-    cached_entry = _fundamentals_cache.get(symbol)
-    
-    # 3. If not in memory, try to load from MongoDB
-    db = None
-    try:
-        import db_manager
-        db = db_manager.get_db()
-    except Exception as db_err:
-        logger.debug(f"Could not import db_manager in fetch_fundamentals: {db_err}")
-
-    if cached_entry is None and db is not None:
-        try:
-            col = db["fundamentals_cache"]
-            doc = col.find_one({"symbol": symbol}, {"_id": 0})
-            if doc:
-                cached_entry = {
-                    "_cached_at": doc.get("_cached_at"),
-                    "data": doc.get("data")
-                }
-                # Sync back to memory cache
-                _fundamentals_cache[symbol] = cached_entry
-        except Exception as mongo_err:
-            logger.debug(f"Failed to fetch {symbol} from MongoDB fundamentals_cache: {mongo_err}")
-
-    # 4. If we found a cached entry, evaluate its age/staleness
+            
+    # Return from cache if available
     is_blocked = is_rate_limited()
-    if cached_entry:
+    if symbol in _fundamentals_cache:
+        # Check if the cache is older than 7 days
+        cached_entry = _fundamentals_cache[symbol]
         cached_time = cached_entry.get("_cached_at")
         if cached_time:
             try:
                 age = (datetime.now() - datetime.fromisoformat(cached_time)).days
-                # If cache is fresh (< 7 days) OR we are currently rate-limited (cooldown), return cache
                 if age < 7 or is_blocked:
+                    # Return cached metrics (accept any age if blocked to avoid network requests)
                     return cached_entry["data"]
             except Exception:
                 if is_blocked:
@@ -495,20 +471,13 @@ def fetch_fundamentals(symbol: str) -> Dict:
 
     if is_blocked:
         logger.debug(f"Skipping fundamentals network fetch for {symbol} due to active rate-limit cooldown.")
-        # Final emergency fallback: return cache even if older than 7 days, to avoid returning empty defaults
-        if cached_entry:
-            return cached_entry["data"]
         return defaults
 
     try:
         ticker = yf.Ticker(symbol, session=get_browser_session())
         info = ticker.info
 
-        # If yfinance returned empty/invalid info, fall back to cached data first before giving up
-        if not info or not info.get("marketCap"):
-            if cached_entry:
-                logger.warning(f"yfinance returned empty info for {symbol} - falling back to cache.")
-                return cached_entry["data"]
+        if not info:
             return defaults
 
         # Map yfinance fields to our structure
@@ -517,7 +486,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
             "market_cap": info.get("marketCap", 0) or 0,
             "pe_ratio": info.get("trailingPE") or info.get("forwardPE"),
             "debt_to_equity": info.get("debtToEquity"),
-            "promoter_holding_pct": None,
+            "promoter_holding_pct": None,   # Not directly in yfinance; requires NSE data
             "roe": info.get("returnOnEquity"),
             "sector": info.get("sector", "Unknown"),
             "industry": info.get("industry", "Unknown"),
@@ -541,10 +510,11 @@ def fetch_fundamentals(symbol: str) -> Dict:
             "quarterly_fcf": [],
         }
 
-        # Convert debt_to_equity
+        # Convert debt_to_equity (yfinance gives it as %, divide by 100)
         if fundamentals["debt_to_equity"] is not None:
             fundamentals["debt_to_equity"] = fundamentals["debt_to_equity"] / 100
 
+        # Skip slow yfinance earnings_dates call as it frequently hangs the morning scan
         fundamentals["has_recent_earnings"] = False
         fundamentals["earnings_surprise"] = None
 
@@ -574,28 +544,11 @@ def fetch_fundamentals(symbol: str) -> Dict:
         except Exception as q_err:
             logger.debug(f"Quarterly financials/cashflow fetch failed for {symbol}: {q_err}")
 
-        # Update cache entry
-        new_cached_entry = {
+        # Save to cache
+        _fundamentals_cache[symbol] = {
             "_cached_at": datetime.now().isoformat(),
             "data": fundamentals
         }
-        
-        # Save to memory cache
-        _fundamentals_cache[symbol] = new_cached_entry
-
-        # Save to MongoDB cache
-        if db is not None:
-            try:
-                col = db["fundamentals_cache"]
-                col.replace_one(
-                    {"symbol": symbol},
-                    {"symbol": symbol, "_cached_at": new_cached_entry["_cached_at"], "data": fundamentals},
-                    upsert=True
-                )
-            except Exception as mongo_err:
-                logger.debug(f"Failed to save {symbol} to MongoDB fundamentals_cache: {mongo_err}")
-
-        # Save to local JSON cache file
         try:
             with open(FUNDAMENTALS_CACHE_FILE, "w") as f:
                 json.dump(_fundamentals_cache, f, indent=2, default=str)
@@ -603,16 +556,6 @@ def fetch_fundamentals(symbol: str) -> Dict:
             logger.debug(f"Failed to save fundamentals cache: {cache_save_err}")
 
         return fundamentals
-
-    except Exception as e:
-        err_msg = str(e)
-        if "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower() or "429" in err_msg or "ratelimit" in type(e).__name__.lower():
-            mark_rate_limited()
-        logger.error(f"Error fetching fundamentals for {symbol}: {e}")
-        # Fallback to cache even if stale since network failed
-        if cached_entry:
-            return cached_entry["data"]
-        return defaults
 
     except Exception as e:
         err_msg = str(e)

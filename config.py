@@ -121,8 +121,8 @@ NIFTY_METAL = "^CNXMETAL"
 # ─────────────────────────────────────────────
 # PRICE FILTER
 # ─────────────────────────────────────────────
-MAX_STOCK_PRICE = 10000    # ₹10,000 max per stock (user requirement)
-MIN_STOCK_PRICE = 50       # Avoid penny stocks
+MAX_STOCK_PRICE = 5000     # ₹5,000 max per stock (updated user requirement)
+MIN_STOCK_PRICE = 5        # ₹5 min to analyze vast stock system
 
 # ─────────────────────────────────────────────
 # PHASE 1 ELITE ARCHITECTURE: 8 ADAPTIVE REGIMES
@@ -133,14 +133,14 @@ MIN_STOCK_PRICE = 50       # Avoid penny stocks
 # Ensemble sub-model base weights (sum = 1.0)
 # Momentum | Quality | Institutional | Catalyst
 ENSEMBLE_WEIGHTS = {
-    "Bull_Trend":        {"momentum": 0.40, "quality": 0.20, "institutional": 0.25, "catalyst": 0.15},
-    "Bull_Expansion":    {"momentum": 0.45, "quality": 0.15, "institutional": 0.25, "catalyst": 0.15},
-    "Bull_Exhaustion":   {"momentum": 0.20, "quality": 0.35, "institutional": 0.30, "catalyst": 0.15},
-    "Neutral_Rotation":  {"momentum": 0.25, "quality": 0.30, "institutional": 0.25, "catalyst": 0.20},
-    "Neutral_Compression": {"momentum": 0.20, "quality": 0.35, "institutional": 0.25, "catalyst": 0.20},
-    "Bear_Trend":        {"momentum": 0.10, "quality": 0.45, "institutional": 0.30, "catalyst": 0.15},
-    "Bear_Panic":        {"momentum": 0.05, "quality": 0.50, "institutional": 0.35, "catalyst": 0.10},
-    "Bear_Recovery":     {"momentum": 0.25, "quality": 0.35, "institutional": 0.25, "catalyst": 0.15},
+    "Bull_Trend":        {"momentum": 0.50, "quality": 0.05, "institutional": 0.40, "catalyst": 0.05},
+    "Bull_Expansion":    {"momentum": 0.55, "quality": 0.05, "institutional": 0.38, "catalyst": 0.02},
+    "Bull_Exhaustion":   {"momentum": 0.40, "quality": 0.10, "institutional": 0.45, "catalyst": 0.05},
+    "Neutral_Rotation":  {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
+    "Neutral_Compression": {"momentum": 0.40, "quality": 0.10, "institutional": 0.45, "catalyst": 0.05},
+    "Bear_Trend":        {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
+    "Bear_Panic":        {"momentum": 0.35, "quality": 0.10, "institutional": 0.50, "catalyst": 0.05},
+    "Bear_Recovery":     {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
 }
 
 # Mapping from 8-state regime to legacy 3-state for backward compatibility

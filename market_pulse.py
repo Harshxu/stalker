@@ -332,6 +332,127 @@ def compute_pulse(
     return result
 
 
+def compute_pulse_from_indicators(
+    indicators_by_symbol: Dict[str, Dict],
+    vix_override: Optional[float] = None,
+) -> Dict:
+    """
+    Computes the Market Pulse using precalculated indicators from the stock universe.
+    This avoids re-fetching OHLCV DataFrames and runs in sub-millisecond time.
+    """
+    # 1. India VIX Signal
+    if vix_override is not None:
+        vix_val = vix_override
+        if vix_val <= VIX_LOW:
+            vix_score = 85.0
+        elif vix_val <= VIX_HIGH:
+            vix_score = 85.0 - (vix_val - VIX_LOW) / (VIX_HIGH - VIX_LOW) * 35.0
+        elif vix_val <= VIX_PANIC:
+            vix_score = 50.0 - (vix_val - VIX_HIGH) / (VIX_PANIC - VIX_HIGH) * 35.0
+        else:
+            vix_score = max(0.0, 15.0 - (vix_val - VIX_PANIC) * 2.0)
+    else:
+        vix_val, vix_score = get_india_vix()
+
+    # 2. Advance / Decline
+    advances = 0
+    declines = 0
+    buying_pressures = []
+    cmf_scores = []
+    volume_ratios = []
+
+    for sym, indic in indicators_by_symbol.items():
+        if not indic:
+            continue
+        
+        # A/D
+        chg = float(indic.get("change_pct", 0.0))
+        if chg > 0:
+            advances += 1
+        elif chg < 0:
+            declines += 1
+            
+        # Buying Pressure
+        bp = indic.get("buying_pressure")
+        if bp is not None:
+            buying_pressures.append(float(bp))
+            
+        # CMF
+        cmf = indic.get("cmf")
+        if cmf is not None:
+            # Map CMF (-1 to +1) to 0-100 score
+            cmf_score = (float(cmf) + 1.0) / 2.0 * 100.0
+            cmf_scores.append(cmf_score)
+            
+        # Volume Surge
+        vol_ratio = indic.get("volume_ratio")
+        if vol_ratio is not None:
+            # Map: ratio 0.5 -> 25, 1.0 -> 50, 2.0 -> 100
+            vol_score = min(100.0, float(vol_ratio) * 50.0)
+            volume_ratios.append(vol_score)
+
+    total_ad = advances + declines
+    ad_score = (advances / total_ad * 100.0) if total_ad > 0 else 50.0
+
+    bp_score = float(np.mean(buying_pressures)) * 100.0 if buying_pressures else 50.0
+    cmf_score_val = float(np.mean(cmf_scores)) if cmf_scores else 50.0
+    vol_score_val = float(np.mean(volume_ratios)) if volume_ratios else 50.0
+
+    # 3. Composite Pulse Calculation
+    w = PULSE_WEIGHTS
+    pulse_score = (
+        w["vix"]      * vix_score +
+        w["ad_ratio"] * ad_score  +
+        w["bp"]       * bp_score  +
+        w["cmf"]      * cmf_score_val +
+        w["volume"]   * vol_score_val
+    )
+    pulse_score = round(min(100.0, max(0.0, pulse_score)), 1)
+
+    # 4. Labeling
+    if pulse_score >= 65:
+        label = "BUYERS_STRONG"
+        emoji = "🟢"
+    elif pulse_score >= 55:
+        label = "BUYERS_SLIGHT"
+        emoji = "🟡"
+    elif pulse_score >= 45:
+        label = "NEUTRAL"
+        emoji = "⚪"
+    elif pulse_score >= 35:
+        label = "SELLERS_SLIGHT"
+        emoji = "🟠"
+    else:
+        label = "SELLERS_STRONG"
+        emoji = "🔴"
+
+    downgrade = pulse_score < PULSE_DOWNGRADE_THRESHOLD
+
+    result = {
+        "pulse_score":      pulse_score,
+        "pulse_label":      label,
+        "pulse_emoji":      emoji,
+        "vix":              vix_val,
+        "vix_score":        round(vix_score, 1),
+        "advances":         advances,
+        "declines":         declines,
+        "ad_ratio":         round(advances / max(1, advances + declines), 3),
+        "ad_score":         round(ad_score, 1),
+        "buying_pressure":  round(bp_score, 1),
+        "cmf_score":        round(cmf_score_val, 1),
+        "volume_score":     round(vol_score_val, 1),
+        "downgrade_buy":    downgrade,
+        "interpretation":   _interpret(pulse_score, vix_val, advances, declines, bp_score),
+    }
+
+    logger.info(
+        f"[PULSE] Precalculated Score={pulse_score} ({label}) | VIX={vix_val:.1f} | "
+        f"A/D={advances}/{declines} | BP={bp_score:.0f}% | CMF={cmf_score_val:.0f}% | Vol={vol_score_val:.0f}%"
+    )
+
+    return result
+
+
 def _interpret(score: float, vix: float, adv: int, dec: int, bp: float) -> str:
     """Returns a plain-English one-line interpretation of the pulse."""
     total = adv + dec

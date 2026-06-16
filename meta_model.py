@@ -70,8 +70,10 @@ def _get_recent_setup_win_rate(
                 if p.get("trade_type") != trade_type:
                     continue
                 # Only analyse resolved trades
-                ret = p.get("future_5d_return") if p.get("future_5d_return") is not None \
-                    else p.get("future_3d_return")
+                ret = p.get("future_1d_return") if p.get("future_1d_return") is not None \
+                    else (p.get("intraday_return") if p.get("intraday_return") is not None \
+                    else (p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                    else p.get("future_3d_return")))
                 if ret is None:
                     continue
                 total += 1

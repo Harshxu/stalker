@@ -67,6 +67,8 @@ def load_resolved_trades(min_trades: int = 200) -> Tuple[pd.DataFrame, bool]:
             # Load trades where future returns are resolved
             records = list(col.find({
                 "$or": [
+                    {"future_1d_return": {"$ne": None}},
+                    {"intraday_return": {"$ne": None}},
                     {"future_5d_return": {"$ne": None}},
                     {"future_3d_return": {"$ne": None}}
                 ]
@@ -79,7 +81,7 @@ def load_resolved_trades(min_trades: int = 200) -> Tuple[pd.DataFrame, bool]:
             all_attr = db_manager._read_json("feature_attributions.json")
             records = [
                 r for r in all_attr
-                if r.get("future_5d_return") is not None or r.get("future_3d_return") is not None
+                if r.get("future_1d_return") is not None or r.get("intraday_return") is not None or r.get("future_5d_return") is not None or r.get("future_3d_return") is not None
             ]
         except Exception as e:
             logger.error(f"Error loading attributions from JSON fallback: {e}")
@@ -90,7 +92,7 @@ def load_resolved_trades(min_trades: int = 200) -> Tuple[pd.DataFrame, bool]:
 
     df = pd.DataFrame(records)
     # Target return is 5d return, falling back to 3d return
-    df["target_return"] = df["future_5d_return"].fillna(df["future_3d_return"])
+    df["target_return"] = df["future_1d_return"].fillna(df["intraday_return"]).fillna(df["future_5d_return"]).fillna(df["future_3d_return"])
     df["date"] = pd.to_datetime(df["date"])
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)

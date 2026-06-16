@@ -4,22 +4,23 @@ STALKER - Main Orchestrator
 Runs the morning scan, records prices, generates reports.
 Scheduled automatically via Windows Task Scheduler.
 """
-import sys
-import io
-import os
-
-# Force UTF-8 output on Windows
+# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
 try:
+    import sys
+    import io
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 except Exception:
-    pass
+    pass  # In-process / thread context — stdout already safe
 
+import os
+import sys
 import json
 import logging
 import schedule
 import time
 import requests
+import atexit
 from datetime import datetime, date
 from typing import Dict
 
@@ -31,6 +32,7 @@ from data_fetcher import is_nse_holiday
 
 # Global Test/Sandbox Flag (bypasses holiday checks and mocks emails in testing mode)
 IS_TEST_MODE = False
+IS_DRY_RUN = False
 
 # ─────────────────────────────────────────────
 # Logging Setup
@@ -45,6 +47,51 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Execution Lock Configuration
+LOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stalker.lock")
+
+def release_execution_lock():
+    """Release execution lock by deleting the lock file."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            os.remove(LOCK_FILE)
+            logger.info("Execution lock file deleted/released successfully.")
+        except Exception as e:
+            logger.error(f"Failed to release execution lock file: {e}")
+
+def acquire_execution_lock():
+    """Acquire execution lock. Terminate if active lock exists and is < 30 minutes old."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f:
+                lock_data = json.load(f)
+            created_time = lock_data.get("lock_created_time", 0)
+            pid = lock_data.get("process_id", 0)
+            age_sec = time.time() - created_time
+            
+            if age_sec < 1800:  # < 30 minutes
+                logger.error(f"Overlapping execution blocked. Active lock exists (PID: {pid}, age: {age_sec/60:.1f} mins).")
+                sys.exit(1)
+            else:
+                logger.warning(f"Clearing stale execution lock (PID: {pid}, age: {age_sec/60:.1f} mins).")
+                release_execution_lock()
+        except Exception as e:
+            logger.warning(f"Failed to read lock file: {e}. Clearing it to avoid deadlock.")
+            release_execution_lock()
+
+    # Write new lock file
+    try:
+        with open(LOCK_FILE, "w") as f:
+            json.dump({
+                "lock_created_time": time.time(),
+                "process_id": os.getpid()
+            }, f, indent=2)
+        logger.info(f"Execution lock acquired successfully (PID: {os.getpid()}).")
+        atexit.register(release_execution_lock)
+    except Exception as e:
+        logger.critical(f"Failed to create execution lock file: {e}")
+        sys.exit(1)
 
 # ─────────────────────────────────────────────
 # Scheduler Task Wrapper (Handles Errors & Automatic Retries)
@@ -120,25 +167,28 @@ def run_premarket_analysis():
 
     try:
         # Run the full screener — full universe, all indicators
-        result = screener.run_screen(top_n=config.TOP_PICKS_COUNT)
+        result = screener.run_screen(top_n=config.TOP_PICKS_COUNT, dry_run=IS_DRY_RUN)
         _today_scan_result = result
 
         picks = result.get("top_picks", [])
         _today_symbols_picked = [p["symbol"] for p in picks]
 
-        # Save to DB immediately so dashboard can read it
-        db_manager.save_daily_picks(result)
+        if not IS_DRY_RUN:
+            # Save to DB immediately so dashboard can read it
+            db_manager.save_daily_picks(result)
 
-        # Automatically clean up MongoDB data older than 10 days to save space
-        try:
-            db_manager.cleanup_old_data(days_to_keep=10)
-        except Exception as clean_err:
-            logger.error(f"Failed to auto-cleanup MongoDB space: {clean_err}")
+            # Automatically clean up MongoDB data older than 10 days to save space
+            try:
+                db_manager.cleanup_old_data(days_to_keep=10)
+            except Exception as clean_err:
+                logger.error(f"Failed to auto-cleanup MongoDB space: {clean_err}")
 
-        # Save scan result to JSON for dashboard
-        scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
-        with open(scan_path, "w") as f:
-            json.dump(result, f, indent=2, default=str)
+            # Save scan result to JSON for dashboard
+            scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+            with open(scan_path, "w") as f:
+                json.dump(result, f, indent=2, default=str)
+        else:
+            logger.info("[DRY RUN] Bypassing daily picks DB and file writes.")
 
         logger.info(f"Pre-market analysis complete. {len(picks)} picks ready for today.")
         _print_picks_summary(result)
@@ -307,7 +357,7 @@ def verify_picks_prices():
         _time.sleep(0.15)   # polite delay between tickers
 
     # ── Save updated scan result back to DB and disk ──────────────────────
-    if updated_count > 0:
+    if updated_count > 0 and not IS_DRY_RUN:
         logger.info(f"Saving {updated_count} corrected prices back to DB...")
         try:
             db_manager.save_daily_picks(_today_scan_result)
@@ -319,6 +369,8 @@ def verify_picks_prices():
                 json.dump(_today_scan_result, f, indent=2, default=str)
         except Exception:
             pass
+    elif updated_count > 0:
+        logger.info(f"[DRY RUN] Bypassing re-saving {updated_count} corrected prices to DB.")
 
     # ── Build verification report dict (used by morning email) ───────────
     pass_count = total - failed_count
@@ -394,14 +446,15 @@ def run_morning_scan():
         if not _today_scan_result:
             logger.warning("No pre-computed 7:00 AM picks found in DB or local fallback. Initiating emergency scan...")
             try:
-                result = screener.run_screen(top_n=config.TOP_PICKS_COUNT)
+                result = screener.run_screen(top_n=config.TOP_PICKS_COUNT, dry_run=IS_DRY_RUN)
                 _today_scan_result = result
                 picks = result.get("top_picks", [])
                 _today_symbols_picked = [p["symbol"] for p in picks if p.get("symbol")]
-                db_manager.save_daily_picks(result)
-                scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
-                with open(scan_path, "w") as f:
-                    json.dump(result, f, indent=2, default=str)
+                if not IS_DRY_RUN:
+                    db_manager.save_daily_picks(result)
+                    scan_path = os.path.join(config.DATA_DIR, "latest_scan.json")
+                    with open(scan_path, "w") as f:
+                        json.dump(result, f, indent=2, default=str)
                 _print_picks_summary(result)
             except Exception as scan_err:
                 logger.critical(f"Emergency scan also failed: {scan_err}. Aborting email.")
@@ -409,11 +462,14 @@ def run_morning_scan():
         else:
             logger.info(f"Using pre-market picks: {len(_today_symbols_picked)} stocks ready")
 
-        # Send automated morning email with today's top picks + verification report
-        _send_morning_email(_today_scan_result, _verification_report)
+        if not IS_DRY_RUN:
+            # Send automated morning email with today's top picks + verification report
+            _send_morning_email(_today_scan_result, _verification_report)
 
-        # Open dashboard in browser
-        _open_dashboard()
+            # Open dashboard in browser
+            _open_dashboard()
+        else:
+            logger.info("[DRY RUN] Bypassing morning email send and dashboard open.")
 
     except Exception as e:
         logger.error(f"Morning email dispatch failed: {e}", exc_info=True)
@@ -451,12 +507,15 @@ def record_open_prices():
         logger.info("No open prices retrieved (Market is closed today).")
         return
 
-    db_manager.save_open_prices(prices)
+    if not IS_DRY_RUN:
+        db_manager.save_open_prices(prices)
 
-    # Update dashboard file
-    open_path = os.path.join(config.DATA_DIR, "open_prices.json")
-    with open(open_path, "w") as f:
-        json.dump({"date": str(date.today()), "prices": prices}, f, indent=2, default=str)
+        # Update dashboard file
+        open_path = os.path.join(config.DATA_DIR, "open_prices.json")
+        with open(open_path, "w") as f:
+            json.dump({"date": str(date.today()), "prices": prices}, f, indent=2, default=str)
+    else:
+        logger.info("[DRY RUN] Bypassing open prices database and file writes.")
 
     logger.info("Open prices recorded")
 
@@ -491,11 +550,14 @@ def record_close_prices():
         logger.info("No close prices retrieved (Market is closed today).")
         return
 
-    db_manager.save_close_prices(prices)
+    if not IS_DRY_RUN:
+        db_manager.save_close_prices(prices)
 
-    close_path = os.path.join(config.DATA_DIR, "close_prices.json")
-    with open(close_path, "w") as f:
-        json.dump({"date": str(date.today()), "prices": prices}, f, indent=2, default=str)
+        close_path = os.path.join(config.DATA_DIR, "close_prices.json")
+        with open(close_path, "w") as f:
+            json.dump({"date": str(date.today()), "prices": prices}, f, indent=2, default=str)
+    else:
+        logger.info("[DRY RUN] Bypassing close prices database and file writes.")
 
     logger.info("Close prices recorded")
 
@@ -711,24 +773,27 @@ def generate_eod_report():
         "is_test":               IS_TEST_MODE,
     }
 
-    eod_path = os.path.join(config.DATA_DIR, "eod_report.json")
-    with open(eod_path, "w") as f:
-        json.dump(eod_data, f, indent=2, default=str)
+    if not IS_DRY_RUN:
+        eod_path = os.path.join(config.DATA_DIR, "eod_report.json")
+        with open(eod_path, "w") as f:
+            json.dump(eod_data, f, indent=2, default=str)
 
-    # Save to database
-    db_manager.save_eod_report(eod_data)
+        # Save to database
+        db_manager.save_eod_report(eod_data)
 
-    # Send email report
-    _send_email_report(eod_data)
+        # Send email report
+        _send_email_report(eod_data)
 
-    logger.info("EOD report generated successfully.")
+        logger.info("EOD report generated successfully.")
 
-    # Trigger private EOD mistakes audit report strictly to the owner (harshkumawat9950@gmail.com)
-    try:
-        import generate_mistakes_audit
-        generate_mistakes_audit.run_mistakes_audit()
-    except Exception as audit_err:
-        logger.error(f"Failed to execute private EOD mistakes audit: {audit_err}")
+        # Trigger private EOD mistakes audit report strictly to the owner (harshkumawat9950@gmail.com)
+        try:
+            import generate_mistakes_audit
+            generate_mistakes_audit.run_mistakes_audit()
+        except Exception as audit_err:
+            logger.error(f"Failed to execute private EOD mistakes audit: {audit_err}")
+    else:
+        logger.info("[DRY RUN] Bypassing EOD report database/file writes, email send, and mistakes audit.")
 
 
 # ─────────────────────────────────────────────
@@ -812,8 +877,18 @@ def _send_admin_alert(reason: str, detail: str = ""):
     subject = f"🚨 STALKER ALERT: {reason}"
     html_body = f"""
     <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            @media screen and (max-width: 600px) {{
+                body {{ padding: 10px !important; }}
+                .alert-container {{ border-radius: 8px !important; }}
+            }}
+        </style>
+    </head>
     <body style="font-family: 'Segoe UI', sans-serif; background: #fef2f2; padding: 20px; margin: 0;">
-        <div style="max-width: 600px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; border: 2px solid #dc2626;">
+        <div style="max-width: 600px; margin: 0 auto; background: #fff; border-radius: 12px; overflow: hidden; border: 2px solid #dc2626;" class="alert-container">
             <div style="background: #dc2626; padding: 24px; text-align: center; color: #fff;">
                 <h1 style="margin: 0; font-size: 22px;">🚨 STALKER SYSTEM ALERT</h1>
                 <p style="margin: 6px 0 0; font-size: 13px; opacity: 0.9;">{date_str}</p>
@@ -839,6 +914,20 @@ def _send_admin_alert(reason: str, detail: str = ""):
 
 def _send_morning_email(scan_result: Dict, verification: Dict = None):
     try:
+        if isinstance(scan_result, dict) and scan_result.get("safe_mode"):
+            logger.critical(
+                f"[MORNING EMAIL] Safe Mode is ACTIVE. Reason: {scan_result.get('safe_mode_reason')}. "
+                "Sending admin alert instead of morning picks."
+            )
+            _send_admin_alert(
+                "SYSTEM STATUS: SAFE MODE ACTIVE",
+                f"STALKER V2 has terminated execution and entered Safe Mode.\n\n"
+                f"Reason: {scan_result.get('safe_mode_reason')}\n"
+                f"Scan Date: {scan_result.get('date')}\n"
+                f"Scan Time: {scan_result.get('scan_time')}"
+            )
+            return
+
         picks    = scan_result.get("top_picks", [])[:10]
         market   = scan_result.get("market_trend", "unknown").upper()
         date_str = str(date.today())
@@ -957,24 +1046,124 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                 
                 rows_html += f"""
                 <tr style="border-bottom: 1px solid #e5e7eb;">
-                    <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
-                    <td style="padding: 12px 8px; text-align: center;">
+                    <td class="stock-name-cell" style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{i}. {name}</td>
+                    <td data-label="Action" style="padding: 12px 8px; text-align: center;">
                         <span style="display: inline-block; padding: 4px 10px; border-radius: 9999px; font-size: 12px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
                             {action}
                         </span>
                     </td>
-                    <td style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">{price_str}</td>
-                    <td style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">{target_str}</td>
-                    <td style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">{stop_loss_str}</td>
-                    <td style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
-                    <td style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
+                    <td data-label="Open (Entry)" style="padding: 12px 8px; text-align: right; color: #374151; font-weight: 500;">{price_str}</td>
+                    <td data-label="Target 2" style="padding: 12px 8px; text-align: right; color: #16a34a; font-weight: bold;">{target_str}</td>
+                    <td data-label="Stop Loss" style="padding: 12px 8px; text-align: right; color: #dc2626; font-weight: bold;">{stop_loss_str}</td>
+                    <td data-label="Score" style="padding: 12px 8px; text-align: center; color: #4b5563;">{score:.1f}</td>
+                    <td data-label="Risk" style="padding: 12px 8px; text-align: center; color: #6b7280; font-size: 12px;">{risk}</td>
                 </tr>
                 """
             
         html_body = f"""
         <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                @media screen and (max-width: 600px) {{
+                    body {{
+                        padding: 10px !important;
+                    }}
+                    .email-container {{
+                        border-radius: 8px !important;
+                        box-shadow: none !important;
+                    }}
+                    .body-padding {{
+                        padding: 16px !important;
+                    }}
+                    .mobile-stack {{
+                        display: block !important;
+                        width: 100% !important;
+                    }}
+                    .mobile-card {{
+                        display: block !important;
+                        width: 100% !important;
+                        margin-bottom: 12px !important;
+                        box-sizing: border-box !important;
+                    }}
+                    .mobile-flex-row {{
+                        display: block !important;
+                        width: 100% !important;
+                    }}
+                    .mobile-text-right {{
+                        text-align: left !important;
+                        margin-top: 8px !important;
+                        display: block !important;
+                    }}
+                    /* Responsive Table to Cards */
+                    .responsive-table {{
+                        width: 100% !important;
+                        min-width: 100% !important;
+                    }}
+                    .responsive-table thead {{
+                        display: none !important;
+                    }}
+                    .responsive-table tbody,
+                    .responsive-table tr,
+                    .responsive-table td {{
+                        display: block !important;
+                        width: 100% !important;
+                        box-sizing: border-box !important;
+                    }}
+                    .responsive-table tr {{
+                        margin-bottom: 16px !important;
+                        border: 1px solid #e2e8f0 !important;
+                        border-radius: 12px !important;
+                        padding: 14px !important;
+                        background-color: #ffffff !important;
+                        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+                    }}
+                    .responsive-table tr:last-child {{
+                        margin-bottom: 0 !important;
+                    }}
+                    .responsive-table td {{
+                        text-align: left !important;
+                        padding: 8px 0 !important;
+                        border: none !important;
+                        border-bottom: 1px dashed #f1f5f9 !important;
+                        display: flex !important;
+                        justify-content: space-between !important;
+                        align-items: center !important;
+                    }}
+                    .responsive-table td:last-child {{
+                        border-bottom: none !important;
+                        padding-bottom: 0 !important;
+                    }}
+                    .responsive-table td:first-child {{
+                        padding-top: 0 !important;
+                    }}
+                    .responsive-table td.stock-name-cell {{
+                        display: block !important;
+                        font-size: 16px !important;
+                        font-weight: 800 !important;
+                        color: #1e3a8a !important;
+                        border-bottom: 2px solid #e2e8f0 !important;
+                        padding-bottom: 8px !important;
+                        margin-bottom: 8px !important;
+                        text-align: left !important;
+                    }}
+                    .responsive-table td.stock-name-cell::before {{
+                        content: "" !important;
+                    }}
+                    .responsive-table td[data-label]::before {{
+                        content: attr(data-label) !important;
+                        font-weight: 700 !important;
+                        color: #475569 !important;
+                        font-size: 12px !important;
+                        text-transform: uppercase !important;
+                        letter-spacing: 0.5px !important;
+                    }}
+                }}
+            </style>
+        </head>
         <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
-            <div style="max-width: 680px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+            <div style="width: 100%; max-width: 680px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);" class="email-container">
                 <!-- Header -->
                 <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 30px 24px; text-align: center; color: #ffffff;">
                     <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">🎯 STALKER MARKET ANALYSIS</h1>
@@ -982,13 +1171,13 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                 </div>
                 
                 <!-- Info Section -->
-                <div style="padding: 24px; background-color: #ffffff;">
-                    <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #f3f4f6; padding-bottom: 15px; margin-bottom: 20px;">
+                <div style="padding: 24px; background-color: #ffffff;" class="body-padding">
+                    <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #f3f4f6; padding-bottom: 15px; margin-bottom: 20px;" class="mobile-flex-row">
                         <div>
                             <span style="font-size: 12px; color: #9ca3af; text-transform: uppercase; font-weight: bold;">Analysis Date</span>
                             <div style="font-size: 16px; font-weight: bold; color: #1f2937;">{date_str}</div>
                         </div>
-                        <div style="text-align: right;">
+                        <div style="text-align: right;" class="mobile-text-right">
                             <span style="font-size: 12px; color: #9ca3af; text-transform: uppercase; font-weight: bold;">Market Outlook</span>
                             <div style="font-size: 16px; font-weight: bold; color: #3b82f6;">{market}</div>
                         </div>
@@ -1003,22 +1192,24 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
                     <h3 style="margin: 0 0 12px 0; color: #1e3a8a; font-weight: 700; font-size: 18px;">🔥 Today's Top Picks</h3>
                     
                     <!-- Table -->
-                    <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
-                        <thead>
-                            <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; color: #475569; font-weight: bold;">
-                                <th style="padding: 10px 8px; text-align: left;">Stock</th>
-                                <th style="padding: 10px 8px; text-align: center;">Action</th>
-                                <th style="padding: 10px 8px; text-align: right;">Open (Entry)</th>
-                                <th style="padding: 10px 8px; text-align: right;">Target 2</th>
-                                <th style="padding: 10px 8px; text-align: right;">Stop Loss</th>
-                                <th style="padding: 10px 8px; text-align: center;">Score</th>
-                                <th style="padding: 10px 8px; text-align: center;">Risk</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {rows_html}
-                        </tbody>
-                    </table>
+                    <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;">
+                        <table class="responsive-table" style="width: 100%; border-collapse: collapse; font-size: 14px;">
+                            <thead>
+                                <tr style="background-color: #f8fafc; border-bottom: 2px solid #e2e8f0; color: #475569; font-weight: bold;">
+                                    <th style="padding: 10px 8px; text-align: left;">Stock</th>
+                                    <th style="padding: 10px 8px; text-align: center;">Action</th>
+                                    <th style="padding: 10px 8px; text-align: right;">Open (Entry)</th>
+                                    <th style="padding: 10px 8px; text-align: right;">Target 2</th>
+                                    <th style="padding: 10px 8px; text-align: right;">Stop Loss</th>
+                                    <th style="padding: 10px 8px; text-align: center;">Score</th>
+                                    <th style="padding: 10px 8px; text-align: center;">Risk</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows_html}
+                            </tbody>
+                        </table>
+                    </div>
                     
                     <!-- Note Section -->
                     {strategy_note}
@@ -1049,8 +1240,26 @@ def _send_market_closed_email():
     
     html_body = f"""
     <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            @media screen and (max-width: 600px) {{
+                body {{
+                    padding: 10px !important;
+                }}
+                .email-container {{
+                    border-radius: 8px !important;
+                    box-shadow: none !important;
+                }}
+                .body-padding {{
+                    padding: 30px 16px !important;
+                }}
+            }}
+        </style>
+    </head>
     <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
-        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+        <div style="width: 100%; max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);" class="email-container">
             <!-- Header -->
             <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 35px 24px; text-align: center; color: #ffffff;">
                 <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">🔔 MARKET CLOSED TODAY</h1>
@@ -1058,7 +1267,7 @@ def _send_market_closed_email():
             </div>
             
             <!-- Info Section -->
-            <div style="padding: 30px 24px; text-align: center; background-color: #ffffff;">
+            <div style="padding: 30px 24px; text-align: center; background-color: #ffffff;" class="body-padding">
                 <div style="font-size: 48px; margin-bottom: 20px;">☕</div>
                 <h3 style="margin: 0 0 10px 0; color: #1e3a8a; font-weight: 700; font-size: 20px;">Market is Closed Today</h3>
                 <p style="font-size: 15px; color: #4b5563; line-height: 1.6; margin: 0 0 20px 0;">
@@ -1127,9 +1336,13 @@ def _send_email_report(eod_data: Dict):
         today_avg_pnl = (sum(p.get("pnl_pct") for p in executed_picks) / len(executed_picks)) if executed_picks else 0.0
         today_pnl_color = "#16a34a" if today_avg_pnl >= 0 else "#dc2626"
         
+        perf = eod_data.get("performance", {})
+        matured_win_rate = perf.get("win_rate", 0.0)
+        matured_trades = perf.get("total_trades", 0)
+        
         is_test = eod_data.get("is_test", False)
         subject_prefix = "⚠️ [TEST / SIMULATED] " if is_test else ""
-        subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | Today's WR: {today_win_rate:.1f}% | W:{wins} L:{losses}"
+        subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | WR: {matured_win_rate:.1f}% | Today: {today_avg_pnl:+.2f}%"
 
         # ── Sector Grouping & Performance Audit ───────────────────────
         sectors = {}
@@ -1172,46 +1385,48 @@ def _send_email_report(eod_data: Dict):
                 
                 rows_html += f"""
                 <tr style="border-bottom: 1px solid #e5e7eb;">
-                    <td style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{name}</td>
-                    <td style="padding: 12px 8px; text-align: center;">
+                    <td class="stock-name-cell" style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{name}</td>
+                    <td data-label="Type" style="padding: 12px 8px; text-align: center;">
                         <span style="display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
                             {action}
                         </span>
                     </td>
-                    <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
-                    <td style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
-                    <td style="padding: 12px 8px; text-align: right; color: {vwap_trend_color}; font-size: 12px; font-weight: 500;">
+                    <td data-label="Open" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
+                    <td data-label="Close" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
+                    <td data-label="Intraday VWAP" style="padding: 12px 8px; text-align: right; color: {vwap_trend_color}; font-size: 12px; font-weight: 500;">
                         ₹{vwap_p:,.2f}<br/><span style="font-size: 9px;">({vwap_trend})</span>
                     </td>
-                    <td style="padding: 12px 8px; text-align: right; color: {rel_strength_color}; font-weight: 500;">{rel_strength:+.2f}%</td>
-                    <td style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
-                    <td style="padding: 12px 8px; text-align: center; color: {m_score_color}; font-weight: bold; font-size: 14px;">{m_score:.1f}<span style="font-size: 9px; color: #9ca3af;">/10</span></td>
+                    <td data-label="Nifty RS" style="padding: 12px 8px; text-align: right; color: {rel_strength_color}; font-weight: 500;">{rel_strength:+.2f}%</td>
+                    <td data-label="P&L %" style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
+                    <td data-label="Momentum" style="padding: 12px 8px; text-align: center; color: {m_score_color}; font-weight: bold; font-size: 14px;">{m_score:.1f}<span style="font-size: 9px; color: #9ca3af;">/10</span></td>
                 </tr>
                 """
                 
             grouped_tables_html += f"""
             <div style="margin-bottom: 30px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
-                <div style="background-color: #f8fafc; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;">
+                <div style="background-color: #f8fafc; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;" class="mobile-flex-row">
                     <span style="font-weight: 800; color: #1e293b; font-size: 14px;">📂 Sector: {sec}</span>
-                    <span style="font-weight: bold; color: {sec_pnl_color}; font-size: 13px;">Avg Return: {avg_sec_pnl:+.2f}%</span>
+                    <span style="font-weight: bold; color: {sec_pnl_color}; font-size: 13px;" class="mobile-text-right">Avg Return: {avg_sec_pnl:+.2f}%</span>
                 </div>
-                <table style="width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4;">
-                    <thead>
-                        <tr style="background-color: #fafafa; border-bottom: 1px solid #e5e7eb; color: #64748b; font-weight: bold; font-size: 11px;">
-                            <th style="padding: 8px; text-align: left;">Stock</th>
-                            <th style="padding: 8px; text-align: center;">Type</th>
-                            <th style="padding: 8px; text-align: right;">Open</th>
-                            <th style="padding: 8px; text-align: right;">Close</th>
-                            <th style="padding: 8px; text-align: right;">Intraday VWAP</th>
-                            <th style="padding: 8px; text-align: right;">Nifty RS</th>
-                            <th style="padding: 8px; text-align: right;">P&L %</th>
-                            <th style="padding: 8px; text-align: center;">Momentum</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {rows_html}
-                    </tbody>
-                </table>
+                <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;">
+                    <table class="responsive-table" style="width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4;">
+                        <thead>
+                            <tr style="background-color: #fafafa; border-bottom: 1px solid #e5e7eb; color: #64748b; font-weight: bold; font-size: 11px;">
+                                <th style="padding: 8px; text-align: left;">Stock</th>
+                                <th style="padding: 8px; text-align: center;">Type</th>
+                                <th style="padding: 8px; text-align: right;">Open</th>
+                                <th style="padding: 8px; text-align: right;">Close</th>
+                                <th style="padding: 8px; text-align: right;">Intraday VWAP</th>
+                                <th style="padding: 8px; text-align: right;">Nifty RS</th>
+                                <th style="padding: 8px; text-align: right;">P&L %</th>
+                                <th style="padding: 8px; text-align: center;">Momentum</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rows_html}
+                        </tbody>
+                    </table>
+                </div>
             </div>
             """
 
@@ -1233,8 +1448,108 @@ def _send_email_report(eod_data: Dict):
 
         html_body = f"""
         <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>
+                @media screen and (max-width: 600px) {{
+                    body {{
+                        padding: 10px !important;
+                    }}
+                    .email-container {{
+                        border-radius: 8px !important;
+                        box-shadow: none !important;
+                    }}
+                    .body-padding {{
+                        padding: 16px !important;
+                    }}
+                    .mobile-stack {{
+                        display: block !important;
+                        width: 100% !important;
+                    }}
+                    .mobile-card {{
+                        display: block !important;
+                        width: 100% !important;
+                        margin-bottom: 12px !important;
+                        box-sizing: border-box !important;
+                    }}
+                    .mobile-flex-row {{
+                        display: block !important;
+                        width: 100% !important;
+                    }}
+                    .mobile-text-right {{
+                        text-align: left !important;
+                        margin-top: 8px !important;
+                        display: block !important;
+                    }}
+                    /* Responsive Table to Cards */
+                    .responsive-table {{
+                        width: 100% !important;
+                        min-width: 100% !important;
+                    }}
+                    .responsive-table thead {{
+                        display: none !important;
+                    }}
+                    .responsive-table tbody,
+                    .responsive-table tr,
+                    .responsive-table td {{
+                        display: block !important;
+                        width: 100% !important;
+                        box-sizing: border-box !important;
+                    }}
+                    .responsive-table tr {{
+                        margin-bottom: 16px !important;
+                        border: 1px solid #e2e8f0 !important;
+                        border-radius: 12px !important;
+                        padding: 14px !important;
+                        background-color: #ffffff !important;
+                        box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+                    }}
+                    .responsive-table tr:last-child {{
+                        margin-bottom: 0 !important;
+                    }}
+                    .responsive-table td {{
+                        text-align: left !important;
+                        padding: 8px 0 !important;
+                        border: none !important;
+                        border-bottom: 1px dashed #f1f5f9 !important;
+                        display: flex !important;
+                        justify-content: space-between !important;
+                        align-items: center !important;
+                    }}
+                    .responsive-table td:last-child {{
+                        border-bottom: none !important;
+                        padding-bottom: 0 !important;
+                    }}
+                    .responsive-table td:first-child {{
+                        padding-top: 0 !important;
+                    }}
+                    .responsive-table td.stock-name-cell {{
+                        display: block !important;
+                        font-size: 15px !important;
+                        font-weight: 800 !important;
+                        color: #0f172a !important;
+                        border-bottom: 2px solid #e2e8f0 !important;
+                        padding-bottom: 8px !important;
+                        margin-bottom: 8px !important;
+                        text-align: left !important;
+                    }}
+                    .responsive-table td.stock-name-cell::before {{
+                        content: "" !important;
+                    }}
+                    .responsive-table td[data-label]::before {{
+                        content: attr(data-label) !important;
+                        font-weight: 700 !important;
+                        color: #64748b !important;
+                        font-size: 11px !important;
+                        text-transform: uppercase !important;
+                        letter-spacing: 0.5px !important;
+                    }}
+                }}
+            </style>
+        </head>
         <body style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f3f4f6; padding: 20px; margin: 0;">
-            <div style="max-width: 760px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);">
+            <div style="width: 100%; max-width: 760px; margin: 0 auto; background-color: #ffffff; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1);" class="email-container">
                 <!-- Header -->
                 <div style="background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%); padding: 30px 24px; text-align: center; color: #ffffff;">
                     <h1 style="margin: 0; font-size: 26px; font-weight: 800; letter-spacing: 0.5px;">📊 QUANT PERFORMANCE EOD REPORT</h1>
@@ -1244,43 +1559,46 @@ def _send_email_report(eod_data: Dict):
                 {test_banner_html}
                 
                 <!-- Info Section -->
-                <div style="padding: 24px; background-color: #ffffff;">
+                <div style="padding: 24px; background-color: #ffffff;" class="body-padding">
                     <!-- Key Cards Row 1 -->
-                    <div style="display: flex; gap: 15px; margin-bottom: 15px;">
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Win Rate</div>
-                            <div style="font-size: 20px; font-weight: 800; color: #1e3b8a;">{today_win_rate:.1f}%</div>
+                    <div style="display: flex; gap: 15px; margin-bottom: 15px;" class="mobile-stack">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Matured Win Rate (30d)</div>
+                            <div style="font-size: 20px; font-weight: 800; color: #1e3b8a;">{matured_win_rate:.1f}%</div>
+                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">({matured_trades} trades)</div>
                         </div>
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Avg P&L vs Open</div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Avg Return</div>
                             <div style="font-size: 20px; font-weight: 800; color: {today_pnl_color};">{today_avg_pnl:+.2f}%</div>
+                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">(Day 1 close vs open)</div>
                         </div>
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
-                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Outcomes</div>
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
+                            <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Day-1 Close</div>
                             <div style="font-size: 18px; font-weight: 800; color: #475569;">W: <span style="color:#16a34a;">{wins}</span> | L: <span style="color:#dc2626;">{losses}</span></div>
+                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">(Day 1 Win Rate: {today_win_rate:.1f}%)</div>
                         </div>
                     </div>
 
                     <!-- Key Cards Row 2 (Market Breadth) -->
-                    <div style="display: flex; gap: 15px; margin-bottom: 25px;">
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                    <div style="display: flex; gap: 15px; margin-bottom: 25px;" class="mobile-stack">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
                             <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Nifty 50 Change</div>
                             <div style="font-size: 20px; font-weight: 800; color: {nifty_chg_color};">{nifty_chg:+.2f}%</div>
                         </div>
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
                             <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Breadth (% > Open)</div>
                             <div style="font-size: 20px; font-weight: 800; color: #1e3b8a;">{pct_above_open:.1f}%</div>
                         </div>
-                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+                        <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
                             <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Nifty Beat Ratio</div>
                             <div style="font-size: 20px; font-weight: 800; color: #16a34a;">{pct_outperform_nifty:.1f}%</div>
                         </div>
                     </div>
 
                     <!-- Hot Sector Banner -->
-                    <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 12px 18px; border-radius: 8px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;">
+                    <div style="background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 12px 18px; border-radius: 8px; margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; font-size: 13px;" class="mobile-flex-row">
                         <span style="color: #1e40af; font-weight: bold;">🔥 Today's Leading Industry (Hot Sector):</span>
-                        <span style="background-color: #fff; padding: 4px 10px; border-radius: 6px; border: 1px solid #93c5fd; font-weight: 800; color: {hot_pnl_color};">
+                        <span style="background-color: #fff; padding: 4px 10px; border-radius: 6px; border: 1px solid #93c5fd; font-weight: 800; color: {hot_pnl_color};" class="mobile-text-right">
                             {hot_sector} ({hot_pnl:+.2f}%)
                         </span>
                     </div>
@@ -1371,8 +1689,12 @@ if __name__ == "__main__":
     parser.add_argument("--mode", choices=["run", "scan", "test", "serve"], default="run",
                         help="run=full scheduler | scan=run once now | test=5 stocks | serve=dashboard only")
     parser.add_argument("--capital", type=float, default=100000,
-                        help="Your trading capital in ₹ (default: ₹1,00,000)")
+                        help="Your trading capital in ₹ (default: ₹1,0,000)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run full calculations but bypass database writes, checkpoint updates, and email dispatches.")
     args = parser.parse_args()
+
+    IS_DRY_RUN = args.dry_run
 
     print("""
 +-------------------------------------------+
@@ -1381,12 +1703,16 @@ if __name__ == "__main__":
 +-------------------------------------------+
     """)
 
+    if args.mode in ["run", "scan", "test"] and not IS_DRY_RUN:
+        acquire_execution_lock()
+
     if args.mode == "test":
         print("🧪 Running test scan (5 stocks)...")
         import screener
         result = screener.run_screen(
             symbols=["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "SBIN.NS"],
-            top_n=5
+            top_n=5,
+            dry_run=IS_DRY_RUN
         )
         _print_picks_summary(result)
 

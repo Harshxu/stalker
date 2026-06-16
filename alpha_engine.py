@@ -49,13 +49,13 @@ def score_momentum(
         populated += 1
 
     # 2. Weekly EMA trend confirmation (multi-timeframe filter) — max 20 pts
-    weekly_trend = indic.get("weekly_trend_up")
+    weekly_trend = indic.get("weekly_trend_bullish")
     if weekly_trend is not None:
         score += 20.0 if weekly_trend else 0.0
         populated += 1
 
     # 3. Sharpe-adjusted momentum (smooth trend gets rewarded more) — max 25 pts
-    sharpe_mom = float(indic.get("sharpe_momentum", 0.0))
+    sharpe_mom = float(indic.get("sharpe_like_score", 0.0))
     # Sharpe momentum is already normalised; clip to [-3, 3] and map to 0-25
     sharpe_score = 25.0 * max(0.0, min(1.0, (sharpe_mom + 1.5) / 3.0))
     score += sharpe_score
@@ -150,7 +150,7 @@ def score_institutional(
 
     # 3. Volume Dry-up Signal (key accumulation pattern) — max 20 pts
     # On pullbacks, volume should contract — institutions are NOT distributing
-    vol_dryup = indic.get("volume_dryup_on_pullback")
+    vol_dryup = indic.get("volume_dry_up")
     if vol_dryup is not None:
         populated += 1
         if vol_dryup:

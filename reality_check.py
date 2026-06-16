@@ -68,24 +68,10 @@ def check_earnings_proximity(fund: Dict) -> Tuple[bool, str]:
 
 def check_circuit_proximity(df_hist: pd.DataFrame, fund: Dict) -> Tuple[bool, str]:
     """
-    Returns True (FAILS) if price is within 1% of the upper circuit limit.
-    Uses 52-week high as a proxy when circuit limit is not available.
+    Check circuit proximity.
+    Disabled using 52w high as a proxy because it blocks breakout setups.
     """
-    try:
-        if len(df_hist) < 20:
-            return False, ""
-        close = float(df_hist["Close"].iloc[-1])
-        high_52w = float(df_hist["High"].tail(252).max())
-        if high_52w <= 0 or close <= 0:
-            return False, ""
-        dist_from_high = (high_52w - close) / high_52w
-        # If within 1% of all-time 252-day high AND upper circuit proximity
-        if dist_from_high < CIRCUIT_PROXIMITY_THRESHOLD:
-            return True, f"Circuit Risk: Price {dist_from_high:.1%} from 52w high. Exit liquidity concern."
-        return False, ""
-    except Exception as e:
-        logger.debug(f"[REALITY] Circuit proximity check error: {e}")
-        return False, ""
+    return False, ""
 
 
 def check_minimum_spread(df_hist: pd.DataFrame) -> Tuple[bool, str]:

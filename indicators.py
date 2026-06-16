@@ -190,17 +190,44 @@ def relative_strength_vs_nifty(stock_df: pd.DataFrame, nifty_df: pd.DataFrame, p
 
 def calculate_multi_horizon_rs(stock_df: pd.DataFrame, nifty_df: pd.DataFrame) -> float:
     """
-    Multi-Horizon Relative Strength (Quality Momentum Spec):
-    Combines 20-day (40%), 60-day (40%), and RS Slope (20%).
+    Multi-Horizon Relative Strength (Institutional Grade):
+    Combines:
+      - 1-Month RS (20 days): 10%
+      - 3-Month RS (60 days): 20%
+      - 6-Month RS (120 days): 30%
+      - 12-Month RS (250 days): 40%
+    If history is shorter, weights are dynamically scaled to sum to 1.0.
     """
     try:
-        rs_20 = relative_strength_vs_nifty(stock_df, nifty_df, period=20)
-        rs_60 = relative_strength_vs_nifty(stock_df, nifty_df, period=60) if len(stock_df) >= 60 and len(nifty_df) >= 60 else rs_20
+        available_len = min(len(stock_df), len(nifty_df))
         
-        # RS Slope (difference between 20d and 60d as a proxy for slope/acceleration)
-        rs_slope = rs_20 - (rs_60 / 3) 
+        periods = [20, 60, 120, 250]
+        base_weights = [0.10, 0.20, 0.30, 0.40]
         
-        return float(0.40 * rs_20 + 0.40 * rs_60 + 0.20 * rs_slope)
+        active_periods = []
+        active_weights = []
+        
+        for p, w in zip(periods, base_weights):
+            if available_len >= p:
+                active_periods.append(p)
+                active_weights.append(w)
+                
+        if not active_periods:
+            # Fall back to whatever is available
+            p = max(5, available_len - 1)
+            rs_val = relative_strength_vs_nifty(stock_df, nifty_df, period=p)
+            return float(rs_val)
+            
+        # Normalize weights so they sum to 1.0
+        total_w = sum(active_weights)
+        norm_weights = [w / total_w for w in active_weights]
+        
+        rs_sum = 0.0
+        for p, w in zip(active_periods, norm_weights):
+            rs_val = relative_strength_vs_nifty(stock_df, nifty_df, period=p)
+            rs_sum += w * rs_val
+            
+        return float(rs_sum)
     except Exception:
         return 0.0
 
@@ -278,6 +305,9 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     ohl_signal    = check_ohl_pattern(df)
     dist_52w_high = price_vs_52w(df)
 
+    # Calculate daily percentage change
+    change_pct = float((latest_close - close.iloc[-2]) / close.iloc[-2] * 100.0) if len(close) >= 2 else 0.0
+
     # Relative strength (Multi-Horizon)
     rs_vs_nifty = 0.0
     if nifty_df is not None:
@@ -322,6 +352,12 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
     # Pullback distance from 20 EMA
     dist_from_ema20 = float((latest_close - latest_ema20) / latest_ema20 * 100.0) if latest_ema20 else 0.0
 
+    # Buying Pressure for Market Pulse (Close position inside daily High-Low range)
+    latest_high = float(df["High"].iloc[-1])
+    latest_low = float(df["Low"].iloc[-1])
+    range_size = latest_high - latest_low
+    buying_pressure = (latest_close - latest_low) / range_size if range_size > 0.01 else 0.5
+
     return {
         # Raw values
         "close":          latest_close,
@@ -334,6 +370,7 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
         "volume":         latest_volume,
         "volume_ratio":   vol_ratio,
         "gap_pct":        gap_pct,
+        "change_pct":     change_pct,
         "dist_52w_high":  dist_52w_high,
         "rs_vs_nifty":    rs_vs_nifty,
         "macd":           float(macd_line.iloc[-1]),
@@ -344,6 +381,7 @@ def compute_all_indicators(df: pd.DataFrame, nifty_df: Optional[pd.DataFrame] = 
         "bb_width_ratio": bb_width_ratio,
         "cmf":            latest_cmf,
         "dist_from_ema20": dist_from_ema20,
+        "buying_pressure": buying_pressure,
 
         # Boolean signals
         "above_vwap":     above_vwap,

@@ -57,7 +57,7 @@ def analyze_factor_expectancy() -> tuple:
     for r in records:
         picks_list = r.get("picks", r.get("top_picks", []))
         for p in picks_list:
-            if p.get("future_5d_return") is not None or p.get("future_3d_return") is not None:
+            if p.get("future_1d_return") is not None or p.get("intraday_return") is not None or p.get("future_5d_return") is not None or p.get("future_3d_return") is not None:
                 p_copy = dict(p)
                 p_copy["date"] = r.get("date")
                 flat_picks.append(p_copy)
@@ -90,14 +90,16 @@ def analyze_factor_expectancy() -> tuple:
         else:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
-    return_cols = ["future_3d_return", "future_5d_return", "future_10d_return", "future_20d_return"]
+    return_cols = ["intraday_return", "future_1d_return", "future_3d_return", "future_5d_return", "future_10d_return", "future_20d_return"]
     for col in return_cols:
         if col not in df.columns:
             df[col] = np.nan
         else:
             df[col] = pd.to_numeric(df[col], errors='coerce')
             
-    target_ret = "future_5d_return" if df["future_5d_return"].notna().sum() >= 5 else "future_3d_return"
+    target_ret = "future_1d_return" if df["future_1d_return"].notna().sum() >= 5 \
+        else ("intraday_return" if df["intraday_return"].notna().sum() >= 5 \
+        else ("future_5d_return" if df["future_5d_return"].notna().sum() >= 5 else "future_3d_return"))
     valid_count = df[target_ret].notna().sum()
     
     # Calculate net returns by deducting round-trip transaction costs
@@ -493,30 +495,30 @@ def run_mistakes_audit():
     
     hits_rows = "".join(f"""
     <tr style="border-bottom:1px solid #e2e8f0;">
-        <td style="padding:10px;font-weight:bold;color:#1e293b;">{h['name']}</td>
-        <td style="padding:10px;text-align:right;color:#16a34a;font-weight:bold;">{h['pnl']:+.2f}%</td>
-        <td style="padding:10px;text-align:right;color:#64748b;">₹{h['open']:.2f} ➔ ₹{h['close']:.2f}</td>
-        <td style="padding:10px;text-align:center;color:#475569;">{h['alpha']:.1f}</td>
-        <td style="padding:10px;color:#475569;font-size:12px;">{h['details']}</td>
+        <td class="stock-name-cell" style="padding:10px;font-weight:bold;color:#1e293b;">{h['name']}</td>
+        <td data-label="P&L %" style="padding:10px;text-align:right;color:#16a34a;font-weight:bold;">{h['pnl']:+.2f}%</td>
+        <td data-label="Price Run" style="padding:10px;text-align:right;color:#64748b;">₹{h['open']:.2f} ➔ ₹{h['close']:.2f}</td>
+        <td data-label="Alpha" style="padding:10px;text-align:center;color:#475569;">{h['alpha']:.1f}</td>
+        <td data-label="Outcome" style="padding:10px;color:#475569;font-size:12px;">{h['details']}</td>
     </tr>
     """ for h in hits)
 
     mistakes_rows = "".join(f"""
     <tr style="border-bottom:1px solid #e2e8f0;background-color:#fffbeb;">
-        <td style="padding:10px;font-weight:bold;color:#991b1b;">{m['name']}</td>
-        <td style="padding:10px;text-align:right;color:#dc2626;font-weight:bold;">{m['pnl']:+.2f}%</td>
-        <td style="padding:10px;text-align:right;color:#64748b;">₹{m['open']:.2f} ➔ ₹{m['close']:.2f}</td>
-        <td style="padding:10px;text-align:center;color:#475569;">{m['alpha']:.1f}</td>
-        <td style="padding:10px;color:#991b1b;font-size:12px;font-weight:500;">❌ {m['reason']}</td>
+        <td class="stock-name-cell" style="padding:10px;font-weight:bold;color:#991b1b;">{m['name']}</td>
+        <td data-label="P&L %" style="padding:10px;text-align:right;color:#dc2626;font-weight:bold;">{m['pnl']:+.2f}%</td>
+        <td data-label="Price Run" style="padding:10px;text-align:right;color:#64748b;">₹{m['open']:.2f} ➔ ₹{m['close']:.2f}</td>
+        <td data-label="Alpha" style="padding:10px;text-align:center;color:#475569;">{m['alpha']:.1f}</td>
+        <td data-label="Root Cause" style="padding:10px;color:#991b1b;font-size:12px;font-weight:500;">❌ {m['reason']}</td>
     </tr>
     """ for m in mistakes)
 
     watch_rows = "".join(f"""
     <tr style="border-bottom:1px solid #e2e8f0;">
-        <td style="padding:10px;font-weight:bold;color:#475569;">{w['name']}</td>
-        <td style="padding:10px;text-align:right;color:{'#16a34a' if w['pnl'] > 0 else '#dc2626'};">{w['pnl']:+.2f}%</td>
-        <td style="padding:10px;text-align:center;color:#475569;">{w['alpha']:.1f}</td>
-        <td style="padding:10px;color:#64748b;font-size:12px;">{w['details']}</td>
+        <td class="stock-name-cell" style="padding:10px;font-weight:bold;color:#475569;">{w['name']}</td>
+        <td data-label="P&L %" style="padding:10px;text-align:right;color:{'#16a34a' if w['pnl'] > 0 else '#dc2626'};">{w['pnl']:+.2f}%</td>
+        <td data-label="Alpha" style="padding:10px;text-align:center;color:#475569;">{w['alpha']:.1f}</td>
+        <td data-label="Audit Details" style="padding:10px;color:#64748b;font-size:12px;">{w['details']}</td>
     </tr>
     """ for w in watchlist_perf)
 
@@ -529,8 +531,108 @@ def run_mistakes_audit():
 
     html_body = f"""
     <html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            @media screen and (max-width: 600px) {{
+                body {{
+                    padding: 10px !important;
+                }}
+                .email-container {{
+                    border-radius: 8px !important;
+                    box-shadow: none !important;
+                }}
+                .body-padding {{
+                    padding: 16px !important;
+                }}
+                .mobile-stack {{
+                    display: block !important;
+                    width: 100% !important;
+                }}
+                .mobile-card {{
+                    display: block !important;
+                    width: 100% !important;
+                    margin-bottom: 12px !important;
+                    box-sizing: border-box !important;
+                }}
+                .mobile-flex-row {{
+                    display: block !important;
+                    width: 100% !important;
+                }}
+                .mobile-text-right {{
+                    text-align: left !important;
+                    margin-top: 8px !important;
+                    display: block !important;
+                }}
+                /* Responsive Table to Cards */
+                .responsive-table {{
+                    width: 100% !important;
+                    min-width: 100% !important;
+                }}
+                .responsive-table thead {{
+                    display: none !important;
+                }}
+                .responsive-table tbody,
+                .responsive-table tr,
+                .responsive-table td {{
+                    display: block !important;
+                    width: 100% !important;
+                    box-sizing: border-box !important;
+                }}
+                .responsive-table tr {{
+                    margin-bottom: 16px !important;
+                    border: 1px solid #e2e8f0 !important;
+                    border-radius: 12px !important;
+                    padding: 14px !important;
+                    background-color: #ffffff !important;
+                    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+                }}
+                .responsive-table tr:last-child {{
+                    margin-bottom: 0 !important;
+                }}
+                .responsive-table td {{
+                    text-align: left !important;
+                    padding: 8px 0 !important;
+                    border: none !important;
+                    border-bottom: 1px dashed #f1f5f9 !important;
+                    display: flex !important;
+                    justify-content: space-between !important;
+                    align-items: center !important;
+                }}
+                .responsive-table td:last-child {{
+                    border-bottom: none !important;
+                    padding-bottom: 0 !important;
+                }}
+                .responsive-table td:first-child {{
+                    padding-top: 0 !important;
+                }}
+                .responsive-table td.stock-name-cell {{
+                    display: block !important;
+                    font-size: 15px !important;
+                    font-weight: 800 !important;
+                    color: #0f172a !important;
+                    border-bottom: 2px solid #e2e8f0 !important;
+                    padding-bottom: 8px !important;
+                    margin-bottom: 8px !important;
+                    text-align: left !important;
+                }}
+                .responsive-table td.stock-name-cell::before {{
+                    content: "" !important;
+                }}
+                .responsive-table td[data-label]::before {{
+                    content: attr(data-label) !important;
+                    font-weight: 700 !important;
+                    color: #64748b !important;
+                    font-size: 11px !important;
+                    text-transform: uppercase !important;
+                    letter-spacing: 0.5px !important;
+                }}
+            }}
+        </style>
+    </head>
     <body style="font-family:'Segoe UI',sans-serif;background-color:#f1f5f9;padding:20px;margin:0;">
-        <div style="max-width:740px;margin:0 auto;background-color:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08);border:1px solid #e2e8f0;">
+        <div style="max-width:740px;margin:0 auto;background-color:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08);border:1px solid #e2e8f0;" class="email-container">
             <!-- Header -->
             <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);padding:28px 24px;text-align:center;color:#ffffff;">
                 <h1 style="margin:0;font-size:24px;font-weight:800;letter-spacing:0.5px;">🧠 STALKER CORE DIAGNOSTICS & AUDIT</h1>
@@ -538,18 +640,18 @@ def run_mistakes_audit():
             </div>
             
             <!-- Summary Stats -->
-            <div style="padding:24px;">
+            <div style="padding:24px;" class="body-padding">
                 {warnings_html}
-                <div style="display:flex;gap:15px;margin-bottom:24px;">
-                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;">
+                <div style="display:flex;gap:15px;margin-bottom:24px;" class="mobile-stack">
+                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;" class="mobile-card">
                         <div style="font-size:10px;color:#64748b;font-weight:bold;text-transform:uppercase;margin-bottom:4px;">Audit Win Rate</div>
                         <div style="font-size:18px;font-weight:800;color:#1e3b8a;">{win_rate:.1f}%</div>
                     </div>
-                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;">
+                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;" class="mobile-card">
                         <div style="font-size:10px;color:#64748b;font-weight:bold;text-transform:uppercase;margin-bottom:4px;">Avg P&L vs Open</div>
                         <div style="font-size:18px;font-weight:800;color:{'#16a34a' if avg_pnl >=0 else '#dc2626'};">{avg_pnl:+.2f}%</div>
                     </div>
-                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;">
+                    <div style="flex:1;padding:12px;background-color:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;text-align:center;" class="mobile-card">
                         <div style="font-size:10px;color:#64748b;font-weight:bold;text-transform:uppercase;margin-bottom:4px;">Diagnosed Mistakes</div>
                         <div style="font-size:18px;font-weight:800;color:#dc2626;">{len(mistakes)}</div>
                     </div>
@@ -565,7 +667,7 @@ def run_mistakes_audit():
                 <!-- 2. Hits Table -->
                 {f'''
                 <h3 style="color:#16a34a;border-bottom:2px solid #e2e8f0;padding-bottom:8px;margin-top:24px;margin-bottom:12px;font-size:15px;">🟢 Successful Predictions Today ({len(hits)})</h3>
-                <table style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:24px;">
+                <table class="responsive-table" style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:24px;">
                     <thead>
                         <tr style="background-color:#f8fafc;color:#64748b;font-weight:bold;border-bottom:1px solid #e2e8f0;">
                             <th style="padding:8px;">Stock</th>
@@ -584,7 +686,7 @@ def run_mistakes_audit():
                 <!-- 3. Mistakes Table -->
                 {f'''
                 <h3 style="color:#dc2626;border-bottom:2px solid #e2e8f0;padding-bottom:8px;margin-top:24px;margin-bottom:12px;font-size:15px;">🔴 Diagnosed System Mistakes & False Signals ({len(mistakes)})</h3>
-                <table style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:24px;">
+                <table class="responsive-table" style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:24px;">
                     <thead>
                         <tr style="background-color:#fff5f5;color:#991b1b;font-weight:bold;border-bottom:1px solid #fecaca;">
                             <th style="padding:8px;">Stock</th>
@@ -603,7 +705,7 @@ def run_mistakes_audit():
                 <!-- 4. Watchlist Table -->
                 {f'''
                 <h3 style="color:#475569;border-bottom:2px solid #e2e8f0;padding-bottom:8px;margin-top:24px;margin-bottom:12px;font-size:15px;">🟡 Watchlist Performance & Capital Preservation ({len(watchlist_perf)})</h3>
-                <table style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:12px;">
+                <table class="responsive-table" style="width:100%;border-collapse:collapse;font-size:12px;text-align:left;margin-bottom:12px;">
                     <thead>
                         <tr style="background-color:#f8fafc;color:#64748b;font-weight:bold;border-bottom:1px solid #e2e8f0;">
                             <th style="padding:8px;">Stock</th>

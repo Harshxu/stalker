@@ -27,7 +27,8 @@ def calculate_stop_loss(current_price: float, atr: float,
     else:
         stop = atr_stop
 
-    return round(max(stop, current_price * 0.90), 2)   # Never more than 10% loss
+    return round(max(stop, current_price * 0.96), 2)   # Never more than 4% loss (tighter for intraday/BTST)
+
 
 
 def calculate_targets(entry: float, stop_loss: float) -> Dict:
@@ -192,8 +193,7 @@ def get_account_drawdown(lookback_days: int = 30) -> float:
     """
     Synthesizes an equity curve from the last N days of resolved picks
     in db_manager and returns the current drawdown from peak (as a positive %).
-
-    Returns 0.0 if insufficient data.
+    Calculates true trade-by-trade account return instead of compounding raw stock returns.
     """
     try:
         import db_manager
@@ -206,25 +206,42 @@ def get_account_drawdown(lookback_days: int = 30) -> float:
         flat_returns = []
         for r in sorted(records, key=lambda x: x.get("date", "")):
             picks = r.get("picks", r.get("top_picks", []))
-            rec_date = r.get("date", "")
             for p in picks:
-                ret = p.get("future_5d_return") if p.get("future_5d_return") is not None \
-                    else p.get("future_3d_return")
+                ret = p.get("future_1d_return") if p.get("future_1d_return") is not None \
+                    else (p.get("intraday_return") if p.get("intraday_return") is not None \
+                    else (p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                    else p.get("future_3d_return")))
                 if ret is not None and p.get("action") == "BUY":
-                    flat_returns.append(float(ret))
+                    # Get entry (Open price on date T) and stop loss to calculate SL %
+                    entry = p.get("current_price") or p.get("entry_price")
+                    sl = p.get("stop_loss")
+                    if entry and sl and entry > sl:
+                        sl_pct = (entry - sl) / entry
+                        # Sanity cap on stop loss percentage (e.g., minimum 1%, maximum 15%)
+                        sl_pct = max(0.01, min(0.15, sl_pct))
+                    else:
+                        sl_pct = 0.05  # default 5%
+                    
+                    # Risk per trade is 2% (0.02)
+                    risk_pct = getattr(config, "RISK_PER_TRADE_PCT", 0.02) * 100.0  # 2.0%
+                    
+                    # True account return = Risk% * (Stock Return% / SL%)
+                    acc_ret = risk_pct * (float(ret) / (sl_pct * 100.0))
+                    
+                    # Maximum loss capped at 1.5x of our risk per trade (accounting for slippage/gap risk)
+                    # and maximum gain capped at 4.0x risk per trade
+                    acc_ret = max(-risk_pct * 1.5, min(risk_pct * 4.0, acc_ret))
+                    flat_returns.append(acc_ret)
 
         if len(flat_returns) < 5:
             return 0.0
 
-        import numpy as np
         # Build equity curve: compound growth from 100
         equity = 100.0
         peak = 100.0
-        curve = []
         for r in flat_returns:
             equity *= (1.0 + r / 100.0)
             peak = max(peak, equity)
-            curve.append(equity)
 
         current_dd = (peak - equity) / peak * 100.0
         return round(max(0.0, current_dd), 2)

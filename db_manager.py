@@ -201,32 +201,67 @@ def save_eod_report(eod_data: Dict) -> bool:
 
 def is_kill_switch_active() -> bool:
     """
-    Check if the kill switch is active based on the most recent tracked picks.
-    If the last N consecutive tracked picks resulted in a loss, trigger kill switch.
-    Returns True if buying should be suspended.
+    Check if the kill switch is active based on the chronological history of picks.
+    If 5 consecutive losses occur, a 3-day suspension is triggered.
+    Losses during/before the suspension do not count towards the next trigger.
+    Returns True if we are currently within a suspension window.
     """
-    recent = get_recent_picks(15)
+    from datetime import timedelta
+    
+    recent = get_recent_picks(30)  # Load last 30 days of picks to cover suspension checks
     if not recent:
         return False
         
-    losses_in_a_row = 0
-    recent = sorted(recent, key=lambda x: x.get("date", ""), reverse=True)
-    
+    # Group all picks with completed returns and sort chronologically (oldest first)
+    all_trades = []
     for day_record in recent:
+        d_str = day_record.get("date", "")
+        if not d_str:
+            continue
+        try:
+            d_val = datetime.strptime(d_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+            
         picks = day_record.get("picks", day_record.get("top_picks", []))
-        if not picks: continue
+        for p in picks:
+            if p.get("action") == "BUY":
+                ret = p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                    else p.get("future_3d_return")
+                if ret is not None:
+                    all_trades.append({
+                        "date": d_val,
+                        "is_loss": float(ret) < 0
+                    })
+                
+    # Sort oldest first
+    all_trades.sort(key=lambda x: x["date"])
+    
+    losses_in_a_row = 0
+    suspension_end = None
+    kill_switch_days = getattr(config, "KILL_SWITCH_DAYS", 3)
+    kill_switch_loss_count = getattr(config, "KILL_SWITCH_LOSS_COUNT", 5)
+    
+    for trade in all_trades:
+        t_date = trade["date"]
         
-        for pick in picks:
-            # Look for completed trade tracking
-            ret = pick.get("future_5d_return") or pick.get("future_3d_return")
-            if ret is not None:
-                if ret < 0:
-                    losses_in_a_row += 1
-                    if losses_in_a_row >= getattr(config, "KILL_SWITCH_LOSS_COUNT", 5):
-                        return True
-                else:
-                    return False  # Profit breaks the sequence
-                    
+        # If we are currently in or before a suspension window, skip the trade
+        if suspension_end is not None and t_date <= suspension_end:
+            continue
+            
+        if trade["is_loss"]:
+            losses_in_a_row += 1
+            if losses_in_a_row >= kill_switch_loss_count:
+                # Trigger suspension
+                suspension_end = t_date + timedelta(days=kill_switch_days)
+                losses_in_a_row = 0
+        else:
+            losses_in_a_row = 0
+            
+    if suspension_end is not None and date.today() < suspension_end:
+        logger.warning(f"[KILL SWITCH] Suspension is ACTIVE until {suspension_end}. Buying is disabled.")
+        return True
+        
     return False
 
 
@@ -291,8 +326,8 @@ def get_prices_for_date(target_date: str) -> Dict:
 
 def get_performance_summary(days: int = 30) -> Dict:
     """
-    Calculate win rate, avg P&L, best/worst pick over last N days.
-    Used in dashboard performance panel.
+    Calculate win rate, avg P&L, best/worst pick over last N days based on matured returns.
+    Used in dashboard performance panel and reports.
     """
     recent = get_recent_picks(days)
     if not recent:
@@ -304,32 +339,28 @@ def get_performance_summary(days: int = 30) -> Dict:
     trade_count = 0
     best_pick = None
     worst_pick = None
-    best_pnl = -999
-    worst_pnl = 999
+    best_pnl = -999.0
+    worst_pnl = 999.0
 
     for day_record in recent:
         day = day_record.get("date", "")
-        picks = day_record.get("picks", [])
-        prices = get_prices_for_date(day)
-
-        open_prices  = prices.get("open", {})
-        close_prices = prices.get("close", {})
+        picks = day_record.get("picks", day_record.get("top_picks", []))
 
         for pick in picks:
             symbol = pick.get("symbol")
             if not symbol:
                 continue
+            if pick.get("action") != "BUY":
+                continue  # Only calculate performance for actual BUY picks
 
-            open_q  = open_prices.get(symbol, {})
-            close_q = close_prices.get(symbol, {})
+            # Use matured multi-day returns
+            pnl_pct = pick.get("future_5d_return") if pick.get("future_5d_return") is not None \
+                else pick.get("future_3d_return")
+                
+            if pnl_pct is None:
+                continue  # Skip trades that have not matured yet
 
-            open_price  = open_q.get("open") or open_q.get("current_price")
-            close_price = close_q.get("close") or close_q.get("current_price")
-
-            if not open_price or not close_price or open_price == 0:
-                continue
-
-            pnl_pct = ((close_price - open_price) / open_price) * 100
+            pnl_pct = float(pnl_pct)
             trade_count += 1
             total_pnl_pct += pnl_pct
 
@@ -355,8 +386,8 @@ def get_performance_summary(days: int = 30) -> Dict:
         "wins":        wins,
         "losses":      losses,
         "avg_pnl":     round(avg_pnl, 2),
-        "best":        best_pick,
-        "worst":       worst_pick,
+        "best":        best_pick if best_pnl != -999.0 else None,
+        "worst":       worst_pick if worst_pnl != 999.0 else None,
     }
 
 
@@ -502,6 +533,8 @@ def update_past_picks_returns():
                 continue
                 
             needs_update = (
+                pick.get("intraday_return") is None or
+                pick.get("future_1d_return") is None or
                 pick.get("future_3d_return") is None or
                 pick.get("future_5d_return") is None or
                 pick.get("future_10d_return") is None or
@@ -530,6 +563,8 @@ def update_past_picks_returns():
             # Row 0 of df_after is date T (the execution day).
             # The close on day T + N is df_after['Close'].iloc[N] if len(df_after) > N.
             lookbacks = {
+                0: "intraday_return",
+                1: "future_1d_return",
                 3: "future_3d_return",
                 5: "future_5d_return",
                 10: "future_10d_return",
@@ -635,7 +670,10 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
         picks_list = r.get("picks", r.get("top_picks", []))
         parent_regime = r.get("market_trend", "neutral").capitalize()
         for p in picks_list:
-            raw_ret = p.get("future_5d_return") if p.get("future_5d_return") is not None else p.get("future_3d_return")
+            raw_ret = p.get("future_1d_return") if p.get("future_1d_return") is not None \
+                else (p.get("intraday_return") if p.get("intraday_return") is not None \
+                else (p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                else p.get("future_3d_return")))
             if raw_ret is not None:
                 net_ret = float(raw_ret) - txn_cost_pct
                 p_score = p.get("total_score") or p.get("alpha_score") or 75.0
@@ -760,6 +798,8 @@ def save_feature_attributions_for_day(date_str: str, picks: List[Dict]) -> bool:
             "minervini_score": p.get("minervini_score", 0),
             "vcp_score": p.get("vcp_score", 0.0),
             "final_score": p.get("final_score", 0.0),
+            "intraday_return": p.get("intraday_return"),
+            "future_1d_return": p.get("future_1d_return"),
             "future_3d_return": p.get("future_3d_return"),
             "future_5d_return": p.get("future_5d_return"),
             "future_10d_return": p.get("future_10d_return"),
@@ -811,5 +851,180 @@ def update_attribution_returns(symbol: str, date_str: str, key: str, value: floa
         _write_json("feature_attributions.json", all_attr)
     except Exception as e:
         logger.error(f"Failed to update JSON attribution returns: {e}")
+
+
+# ─────────────────────────────────────────────
+# STALKER V2 ADDITIONS: CHECKS, CHECKPOINTS, BULK
+# ─────────────────────────────────────────────
+
+def check_mongo_connection() -> bool:
+    """Check if MongoDB client is available and active."""
+    global _use_mongo, _mongo_client
+    if not _use_mongo or _mongo_client is None:
+        _init_mongo()
+    if not _use_mongo or _mongo_client is None:
+        return False
+    try:
+        _mongo_client.server_info()  # Ping
+        return True
+    except Exception:
+        return False
+
+
+def bulk_write_records(collection_name: str, records: List[Dict], key_fields: List[str]) -> bool:
+    """
+    Execute a MongoDB bulk write (upsert) for a list of records.
+    If MongoDB is not available, falls back to updating local JSON cache file.
+    """
+    db = get_db()
+    if db is not None:
+        try:
+            from pymongo import UpdateOne
+            operations = []
+            for rec in records:
+                # Remove BSON ObjectId before update to prevent errors
+                rec_copy = dict(rec)
+                rec_copy.pop("_id", None)
+                filter_dict = {k: rec_copy[k] for k in key_fields if k in rec_copy}
+                operations.append(UpdateOne(filter_dict, {"$set": rec_copy}, upsert=True))
+            if operations:
+                col = db[collection_name]
+                result = col.bulk_write(operations, ordered=False)
+                logger.info(f"[DB] Bulk write to {collection_name} succeeded: upserted={result.upserted_count}, matched={result.matched_count}")
+            return True
+        except Exception as e:
+            logger.error(f"[DB] Bulk write to {collection_name} failed: {e}")
+            return False
+
+    # JSON Fallback
+    filename = f"{collection_name}.json"
+    try:
+        existing = _read_json(filename)
+        
+        def get_key_val(rec):
+            return tuple(rec.get(k) for k in key_fields)
+        
+        updated_map = {get_key_val(rec): rec for rec in existing}
+        for rec in records:
+            rec_copy = dict(rec)
+            rec_copy.pop("_id", None)
+            key_val = get_key_val(rec_copy)
+            updated_map[key_val] = rec_copy
+            
+        _write_json(filename, list(updated_map.values()))
+        logger.info(f"[FILE] Bulk write to {filename} completed (fallback)")
+        return True
+    except Exception as e:
+        logger.error(f"[FILE] Bulk write fallback to {filename} failed: {e}")
+        return False
+
+
+def get_checkpoint(date_str: str) -> Optional[Dict]:
+    """Retrieve recovery checkpoint for a specific date."""
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["checkpoints"]
+            chk = col.find_one({"date": date_str}, {"_id": 0})
+            if chk:
+                return chk
+        except Exception as e:
+            logger.error(f"Error fetching checkpoint from MongoDB: {e}")
+    
+    # Fallback to local file
+    chks = _read_json("checkpoints.json")
+    for chk in reversed(chks):
+        if chk.get("date") == date_str:
+            return chk
+    return None
+
+
+def save_checkpoint(date_str: str, stage: str, last_completed_batch: int) -> bool:
+    """Save a recovery checkpoint."""
+    record = {
+        "date": date_str,
+        "stage": stage,
+        "last_completed_batch": last_completed_batch,
+        "updated_at": datetime.now().isoformat()
+    }
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["checkpoints"]
+            col.replace_one({"date": date_str}, record, upsert=True)
+            logger.info(f"[DB] Checkpoint saved: {stage} -> batch {last_completed_batch}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving checkpoint to MongoDB: {e}")
+            return False
+            
+    # Fallback to file
+    try:
+        chks = _read_json("checkpoints.json")
+        chks = [c for c in chks if c.get("date") != date_str]
+        chks.append(record)
+        _write_json("checkpoints.json", chks)
+        logger.info(f"[FILE] Checkpoint saved: {stage} -> batch {last_completed_batch}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving checkpoint to file: {e}")
+        return False
+
+
+def clear_checkpoint(date_str: str) -> bool:
+    """Clear recovery checkpoint for a date."""
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["checkpoints"]
+            col.delete_one({"date": date_str})
+            logger.info(f"[DB] Checkpoint cleared for {date_str}")
+            return True
+        except Exception as e:
+            logger.error(f"Error clearing checkpoint in MongoDB: {e}")
+            
+    # Fallback to file
+    try:
+        chks = _read_json("checkpoints.json")
+        chks = [c for c in chks if c.get("date") != date_str]
+        _write_json("checkpoints.json", chks)
+        logger.info(f"[FILE] Checkpoint cleared for {date_str}")
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing checkpoint in file: {e}")
+        return False
+
+
+def save_cached_fundamental(symbol: str, fundamentals_data: Dict) -> bool:
+    """Save fundamental data to MongoDB collection."""
+    record = {
+        "symbol": symbol,
+        "_cached_at": datetime.now().isoformat(),
+        "data": fundamentals_data
+    }
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["fundamentals_cache"]
+            col.replace_one({"symbol": symbol}, record, upsert=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save fundamentals to MongoDB cache for {symbol}: {e}")
+    return False
+
+
+def get_cached_fundamental(symbol: str) -> Optional[Dict]:
+    """Retrieve fundamental data from MongoDB collection."""
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["fundamentals_cache"]
+            record = col.find_one({"symbol": symbol}, {"_id": 0})
+            if record:
+                return record
+        except Exception as e:
+            logger.error(f"Failed to retrieve fundamentals from MongoDB cache for {symbol}: {e}")
+    return None
+
 
 
