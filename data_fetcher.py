@@ -409,37 +409,10 @@ FUNDAMENTALS_CACHE_FILE = os.path.join(config.DATA_DIR, "fundamentals_cache.json
 
 def fetch_fundamentals(symbol: str) -> Dict:
     """
-    Fetch fundamental data with a local JSON cache layer to avoid slow yfinance network calls.
+    Fetch fundamental data with MongoDB, local JSON, and in-memory cache layers to avoid slow yfinance network calls.
     """
     global _fundamentals_cache
     
-    # Lazy load cache from file
-    if _fundamentals_cache is None:
-        if os.path.exists(FUNDAMENTALS_CACHE_FILE):
-            try:
-                with open(FUNDAMENTALS_CACHE_FILE, "r") as f:
-                    _fundamentals_cache = json.load(f)
-            except Exception:
-                _fundamentals_cache = {}
-        else:
-            _fundamentals_cache = {}
-            
-    # Return from cache if available
-    is_blocked = is_rate_limited()
-    if symbol in _fundamentals_cache:
-        # Check if the cache is older than 7 days
-        cached_entry = _fundamentals_cache[symbol]
-        cached_time = cached_entry.get("_cached_at")
-        if cached_time:
-            try:
-                age = (datetime.now() - datetime.fromisoformat(cached_time)).days
-                if age < 7 or is_blocked:
-                    # Return cached metrics (accept any age if blocked to avoid network requests)
-                    return cached_entry["data"]
-            except Exception:
-                if is_blocked:
-                    return cached_entry["data"]
-
     defaults = {
         "symbol": symbol,
         "market_cap": 0,
@@ -469,6 +442,76 @@ def fetch_fundamentals(symbol: str) -> Dict:
         "quarterly_fcf": [],
     }
 
+    # 1. Check in-memory cache
+    is_blocked = is_rate_limited()
+    if _fundamentals_cache is not None and symbol in _fundamentals_cache:
+        cached_entry = _fundamentals_cache[symbol]
+        cached_time = cached_entry.get("_cached_at")
+        if cached_time:
+            try:
+                age = (datetime.now() - datetime.fromisoformat(cached_time)).days
+                if age < 7 or is_blocked:
+                    return cached_entry["data"]
+            except Exception:
+                if is_blocked:
+                    return cached_entry["data"]
+
+    # 2. Check MongoDB cache (persistent across deployments)
+    try:
+        import db_manager
+        mongo_cached = db_manager.get_cached_fundamental(symbol)
+        if mongo_cached:
+            cached_time = mongo_cached.get("_cached_at")
+            fund_data = mongo_cached.get("data")
+            if fund_data and isinstance(fund_data, dict):
+                if cached_time:
+                    try:
+                        if isinstance(cached_time, str):
+                            dt = datetime.fromisoformat(cached_time)
+                        else:
+                            dt = cached_time
+                        age = (datetime.now() - dt).days
+                        if age < 7 or is_blocked:
+                            # Populate in-memory cache
+                            if _fundamentals_cache is None:
+                                _fundamentals_cache = {}
+                            _fundamentals_cache[symbol] = {
+                                "_cached_at": dt.isoformat(),
+                                "data": fund_data
+                            }
+                            return fund_data
+                    except Exception as age_err:
+                        logger.debug(f"Error checking MongoDB cache age for {symbol}: {age_err}")
+                        if is_blocked:
+                            return fund_data
+                elif is_blocked:
+                    return fund_data
+    except Exception as mongo_err:
+        logger.debug(f"Error checking MongoDB fundamentals cache for {symbol}: {mongo_err}")
+
+    # 3. Check local JSON cache fallback
+    if _fundamentals_cache is None:
+        if os.path.exists(FUNDAMENTALS_CACHE_FILE):
+            try:
+                with open(FUNDAMENTALS_CACHE_FILE, "r") as f:
+                    _fundamentals_cache = json.load(f)
+            except Exception:
+                _fundamentals_cache = {}
+        else:
+            _fundamentals_cache = {}
+
+    if symbol in _fundamentals_cache:
+        cached_entry = _fundamentals_cache[symbol]
+        cached_time = cached_entry.get("_cached_at")
+        if cached_time:
+            try:
+                age = (datetime.now() - datetime.fromisoformat(cached_time)).days
+                if age < 7 or is_blocked:
+                    return cached_entry["data"]
+            except Exception:
+                if is_blocked:
+                    return cached_entry["data"]
+
     if is_blocked:
         logger.debug(f"Skipping fundamentals network fetch for {symbol} due to active rate-limit cooldown.")
         return defaults
@@ -478,6 +521,18 @@ def fetch_fundamentals(symbol: str) -> Dict:
         info = ticker.info
 
         if not info:
+            logger.warning(f"Empty info received from yfinance for {symbol}")
+            if _fundamentals_cache and symbol in _fundamentals_cache:
+                return _fundamentals_cache[symbol]["data"]
+            try:
+                import db_manager
+                mongo_cached = db_manager.get_cached_fundamental(symbol)
+                if mongo_cached:
+                    fund_data = mongo_cached.get("data")
+                    if fund_data and isinstance(fund_data, dict):
+                        return fund_data
+            except:
+                pass
             return defaults
 
         # Map yfinance fields to our structure
@@ -520,6 +575,7 @@ def fetch_fundamentals(symbol: str) -> Dict:
 
         # Fetch quarterly financials and cash flow
         try:
+            import pandas as pd
             q_fin = ticker.quarterly_financials
             if q_fin is not None and not q_fin.empty:
                 rev_row = q_fin.loc['Total Revenue'] if 'Total Revenue' in q_fin.index else None
@@ -545,6 +601,8 @@ def fetch_fundamentals(symbol: str) -> Dict:
             logger.debug(f"Quarterly financials/cashflow fetch failed for {symbol}: {q_err}")
 
         # Save to cache
+        if _fundamentals_cache is None:
+            _fundamentals_cache = {}
         _fundamentals_cache[symbol] = {
             "_cached_at": datetime.now().isoformat(),
             "data": fundamentals
@@ -563,8 +621,17 @@ def fetch_fundamentals(symbol: str) -> Dict:
             mark_rate_limited()
         logger.error(f"Error fetching fundamentals for {symbol}: {e}")
         # Fallback to cache even if stale since network failed
-        if symbol in _fundamentals_cache:
+        if _fundamentals_cache and symbol in _fundamentals_cache:
             return _fundamentals_cache[symbol]["data"]
+        try:
+            import db_manager
+            mongo_cached = db_manager.get_cached_fundamental(symbol)
+            if mongo_cached:
+                fund_data = mongo_cached.get("data")
+                if fund_data and isinstance(fund_data, dict):
+                    return fund_data
+        except:
+            pass
         return defaults
 
 

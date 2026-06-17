@@ -63,7 +63,7 @@ def _get_recent_setup_win_rate(
         total = 0
 
         for r in records:
-            rec_regime = r.get("market_trend", "neutral").capitalize()
+            rec_regime = (r.get("market_trend") or "neutral").capitalize()
             picks = r.get("picks", r.get("top_picks", []))
 
             for p in picks:

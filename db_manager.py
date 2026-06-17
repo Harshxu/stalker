@@ -668,7 +668,7 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
     
     for r in records:
         picks_list = r.get("picks", r.get("top_picks", []))
-        parent_regime = r.get("market_trend", "neutral").capitalize()
+        parent_regime = (r.get("market_trend") or "neutral").capitalize()
         for p in picks_list:
             raw_ret = p.get("future_1d_return") if p.get("future_1d_return") is not None \
                 else (p.get("intraday_return") if p.get("intraday_return") is not None \
@@ -706,7 +706,7 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
         # Level 1: Full Exact Match
         matches = [p for p in flat_picks if 
                    p["trade_type"] == setup_name and 
-                   p["market_regime"] == market_regime.capitalize() and 
+                   p["market_regime"] == (market_regime or "neutral").capitalize() and 
                    p["sector"] == sector and 
                    p["score_bucket"] == score_bucket and
                    p["volatility_regime"] == volatility_regime and
@@ -719,7 +719,7 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
         if len(matches) < 5:
             matches = [p for p in flat_picks if 
                        p["trade_type"] == setup_name and 
-                       p["market_regime"] == market_regime.capitalize() and
+                       p["market_regime"] == (market_regime or "neutral").capitalize() and
                        p["volatility_regime"] == volatility_regime and
                        p["breadth_regime"] == breadth_regime and
                        p["setup_subtype"] == setup_subtype]
@@ -729,7 +729,7 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
         if len(matches) < 5:
             matches = [p for p in flat_picks if 
                        p["trade_type"] == setup_name and 
-                       p["market_regime"] == market_regime.capitalize() and
+                       p["market_regime"] == (market_regime or "neutral").capitalize() and
                        p["volatility_regime"] == volatility_regime]
             source_level = "setup_regime_vol"
             
@@ -737,7 +737,7 @@ def get_setup_expectancy(setup_name: str, market_regime: str = "Bull", sector: s
         if len(matches) < 5:
             matches = [p for p in flat_picks if 
                        p["trade_type"] == setup_name and 
-                       p["market_regime"] == market_regime.capitalize()]
+                       p["market_regime"] == (market_regime or "neutral").capitalize()]
             source_level = "setup_regime"
             
         # Level 5: Setup only Match
