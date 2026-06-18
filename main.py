@@ -4,14 +4,33 @@ STALKER - Main Orchestrator
 Runs the morning scan, records prices, generates reports.
 Scheduled automatically via Windows Task Scheduler.
 """
-# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
+# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced or closed
 try:
     import sys
     import io
+    import os
+    if sys.stdout is None or getattr(sys.stdout, 'closed', False):
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stdout.write('')
+        except Exception:
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+
+    if sys.stderr is None or getattr(sys.stderr, 'closed', False):
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stderr.write('')
+        except Exception:
+            sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 except Exception:
-    pass  # In-process / thread context — stdout already safe
+    pass
+
 
 import os
 import sys
@@ -38,13 +57,18 @@ IS_DRY_RUN = False
 # Logging Setup
 # ─────────────────────────────────────────────
 log_file = os.path.join(config.LOGS_DIR, f"stalker_{date.today()}.log")
+handlers = [logging.FileHandler(log_file, encoding="utf-8")]
+try:
+    if sys.stdout and not getattr(sys.stdout, 'closed', False):
+        sys.stdout.write('')
+        handlers.append(logging.StreamHandler(sys.stdout))
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(log_file, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ]
+    handlers=handlers
 )
 logger = logging.getLogger(__name__)
 
@@ -239,6 +263,13 @@ def verify_picks_prices():
         except Exception as db_err:
             logger.warning(f"Could not load picks from DB: {db_err}")
 
+    if not isinstance(_today_scan_result, dict):
+        logger.warning(
+            f"Bypassing price verification: _today_scan_result is not a dictionary ({type(_today_scan_result)}). "
+            "Pre-market analysis probably failed or was skipped."
+        )
+        return
+
     picks = _today_scan_result.get("top_picks", _today_scan_result.get("picks", []))
     if not picks:
         logger.warning("No picks found to verify — skipping verification")
@@ -396,6 +427,10 @@ def verify_picks_prices():
 def run_morning_scan():
     """Send the morning email at 8:30 AM using pre-computed picks from 7 AM analysis."""
     global _today_scan_result, _today_symbols_picked
+
+    if str(date.today()) == "2026-06-18":
+        logger.info("Today (2026-06-18) is excluded. Bypassing regular morning picks email dispatch.")
+        return
 
     if is_nse_holiday(date.today()) and not IS_TEST_MODE:
         logger.info("Today is a weekend or NSE trading holiday. Dispatching 'Market Closed Today' morning email...")
@@ -569,6 +604,10 @@ def record_close_prices():
 @safe_scheduler_task(max_retries=3, delay_sec=60)
 def generate_eod_report():
     logger.info("Generating EOD report with STALKER Alpha Engine v3.0 Audit Engine...")
+
+    if str(date.today()) == "2026-06-18":
+        logger.info("Today (2026-06-18) is excluded. Bypassing EOD report generation.")
+        return
 
     # Strict holiday / closed day check
     if is_nse_holiday(date.today()) and not IS_TEST_MODE:
@@ -801,6 +840,14 @@ def generate_eod_report():
 # ─────────────────────────────────────────────
 
 def _send_via_brevo(subject: str, html_body: str, admin_only: bool = False) -> bool:
+    if getattr(config, "DISABLE_SUBSCRIBER_EMAILS", False) and not admin_only:
+        logger.info(f"[BREVO] Subscriber email dispatch disabled in config. Bypassing send for subject: {subject}")
+        return True
+
+    if str(date.today()) == "2026-06-18" and "Under Development" not in subject and not admin_only:
+        logger.info(f"Today (2026-06-18) is excluded. Bypassing sending email for subject: {subject}")
+        return False
+
     """
     Send an email using Brevo REST API over HTTPS.
     If admin_only=True, the CC list is suppressed (error alerts go only to the admin).
@@ -913,6 +960,21 @@ def _send_admin_alert(reason: str, detail: str = ""):
 
 
 def _send_morning_email(scan_result: Dict, verification: Dict = None):
+    if str(date.today()) == "2026-06-18":
+        logger.info("Today (2026-06-18) is excluded. Bypassing regular morning picks email dispatch.")
+        return
+
+    if not isinstance(scan_result, dict):
+        logger.critical(
+            f"[MORNING EMAIL] Blocked: scan_result is not a dictionary ({type(scan_result)}). "
+            "Pre-market analysis likely failed/crashed. Sending admin-only alert."
+        )
+        _send_admin_alert(
+            "Morning Email Aborted — Scan Result Invalid",
+            f"scan_result is {type(scan_result)}: {scan_result}."
+        )
+        return
+
     try:
         if isinstance(scan_result, dict) and scan_result.get("safe_mode"):
             logger.critical(
@@ -929,7 +991,7 @@ def _send_morning_email(scan_result: Dict, verification: Dict = None):
             return
 
         picks    = scan_result.get("top_picks", [])[:10]
-        market   = scan_result.get("market_trend", "unknown").upper()
+        market   = (scan_result.get("market_trend") or "unknown").upper()
         date_str = str(date.today())
         ver      = verification or {}
 

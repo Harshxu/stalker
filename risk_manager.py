@@ -252,12 +252,54 @@ def get_account_drawdown(lookback_days: int = 30) -> float:
         return 0.0
 
 
+def get_rolling_net_expectancy(lookback_days: int = 30) -> float:
+    """
+    Calculates the average net target return (expectancy) of the last N days of matured picks.
+    Includes round-trip transaction costs.
+    """
+    try:
+        import db_manager
+        records = db_manager.get_recent_picks(lookback_days)
+        if not records:
+            return 0.0
+            
+        returns = []
+        slippage_pct = getattr(config, "SLIPPAGE_PCT", 0.0010)
+        brokerage_pct = getattr(config, "BROKERAGE_PCT", 0.0005)
+        txn_cost_pct = 2.0 * (slippage_pct + brokerage_pct) * 100.0  # e.g., 0.30%
+        
+        for r in records:
+            picks = r.get("picks", r.get("top_picks", []))
+            for p in picks:
+                if p.get("action") != "BUY":
+                    continue
+                # Use the same hierarchy as mistakes audit / tracker
+                ret = p.get("future_1d_return") if p.get("future_1d_return") is not None \
+                    else (p.get("intraday_return") if p.get("intraday_return") is not None \
+                    else (p.get("future_5d_return") if p.get("future_5d_return") is not None \
+                    else p.get("future_3d_return")))
+                if ret is not None:
+                    returns.append(float(ret) - txn_cost_pct)
+                    
+        if not returns:
+            return 0.0
+            
+        # We want the rolling expectancy of the last 30 trades
+        recent_returns = returns[-30:]
+        return sum(recent_returns) / len(recent_returns)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"[RISK] Could not compute rolling expectancy: {e}")
+        return 0.0
+
+
 def get_drawdown_adjusted_risk(
     base_risk_pct: float = None,
     account_dd_pct: float = None,
 ) -> Dict:
     """
     Applies the drawdown-aware sizing tier to the base risk per trade.
+    Additionally halves position sizing if rolling expectancy is negative.
 
     Tiers (from config.DRAWDOWN_SIZING_TIERS):
       DD 0-5%    → full base risk (1.0x multiplier)
@@ -298,6 +340,15 @@ def get_drawdown_adjusted_risk(
             elif multiplier < 1.0:
                 reason = f"Reduced sizing: Account DD {account_dd_pct:.1f}% → {multiplier:.0%} of base risk."
             break
+
+    # Apply Negative Expectancy Halt (Halve sizing if rolling expectancy < 0)
+    expectancy = get_rolling_net_expectancy(30)
+    if expectancy < 0.0:
+        multiplier *= 0.5
+        if multiplier == 0.0:
+            reason = "Trading halted (Drawdown limit breached)."
+        else:
+            reason += f" | Halved due to negative rolling expectancy ({expectancy:.2f}%)."
 
     adjusted_risk = base_risk_pct * multiplier
     allowed = multiplier > 0.0

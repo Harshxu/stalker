@@ -43,9 +43,9 @@ def score_momentum(
     populated = 0
     score = 0.0
 
-    # 1. RS Percentile rank (primary signal) — max 40 pts
+    # 1. RS Percentile rank (primary signal) — max 50 pts (increased from 40 due to structure score degradation)
     if rs_percentile is not None:
-        score += 0.40 * rs_percentile
+        score += 0.50 * rs_percentile
         populated += 1
 
     # 2. Weekly EMA trend confirmation (multi-timeframe filter) — max 20 pts
@@ -61,8 +61,8 @@ def score_momentum(
     score += sharpe_score
     populated += 1
 
-    # 4. Market Structure bonus — max 15 pts
-    score += 0.15 * struct_score
+    # 4. Market Structure bonus — max 5 pts (decreased from 15 due to decay)
+    score += 0.05 * struct_score
     populated += 1
 
     return round(min(100.0, max(0.0, score)), 2), populated

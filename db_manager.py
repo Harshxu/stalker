@@ -76,13 +76,15 @@ def save_daily_picks(scan_result: Dict) -> bool:
     today = str(date.today())
 
     record = {
-        "date":          today,
-        "scan_time":     scan_result.get("scan_time"),
-        "market_trend":  scan_result.get("market_trend"),
-        "sector_trends": scan_result.get("sector_trends"),
-        "picks":         scan_result.get("top_picks", []),
-        "scanned":       scan_result.get("scanned", 0),
-        "created_at":    datetime.now().isoformat(),
+        "date":             today,
+        "scan_time":        scan_result.get("scan_time"),
+        "market_trend":     scan_result.get("market_trend"),
+        "sector_trends":    scan_result.get("sector_trends"),
+        "picks":            scan_result.get("top_picks", []),
+        "scanned":          scan_result.get("scanned", 0),
+        "created_at":       datetime.now().isoformat(),
+        "safe_mode":        scan_result.get("safe_mode"),
+        "safe_mode_reason": scan_result.get("safe_mode_reason"),
     }
 
     db = get_db()

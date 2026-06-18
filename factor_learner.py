@@ -16,11 +16,29 @@ from scipy.optimize import minimize
 from scipy.stats import spearmanr
 from typing import Dict, List, Tuple
 
-# Force UTF-8 output on Windows console
+# Force UTF-8 output on Windows console — safe guard: never crash if buffer already replaced or closed
 try:
+    import io as _io
+    import os
+    if sys.stdout is None or getattr(sys.stdout, 'closed', False):
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stdout.write('')
+        except Exception:
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+
+    if sys.stderr is None or getattr(sys.stderr, 'closed', False):
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stderr.write('')
+        except Exception:
+            sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-        import io as _io
-        sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 except Exception:
     pass
 

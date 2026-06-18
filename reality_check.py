@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ── Configurable Thresholds ──────────────────────────────────────────
 GAP_EXTENSION_THRESHOLD = 0.05     # >5% gap from prev close = extended
 CIRCUIT_PROXIMITY_THRESHOLD = 0.01  # Within 1% of upper circuit = no exit
-MIN_DAILY_RANGE_PCT = 0.0015       # Average daily range must be >0.15%
+MIN_DAILY_RANGE_PCT = 0.015        # Average daily range must be >1.5% to avoid slow/expensive trades
 EARNINGS_WINDOW_DAYS = 3           # Flag if earnings within 3 days
 
 

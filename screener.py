@@ -35,13 +35,31 @@ import reality_check as rc_module
 import market_pulse as pulse_module
 from portfolio_engine import PortfolioEngine
 
-# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced
+# Force UTF-8 output on Windows — safe guard: never crash if buffer already replaced or closed
 try:
+    import io as _io
+    import os
+    if sys.stdout is None or getattr(sys.stdout, 'closed', False):
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stdout.write('')
+        except Exception:
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+
+    if sys.stderr is None or getattr(sys.stderr, 'closed', False):
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+    else:
+        try:
+            sys.stderr.write('')
+        except Exception:
+            sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
     if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
-        import io as _io
-        sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        if hasattr(sys.stdout, 'buffer'):
+            sys.stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 except Exception:
-    pass  # In-process / thread context — stdout already safe
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -956,13 +974,13 @@ def run_screen(symbols: Optional[List[str]] = None,
         buying_permitted = re_module.is_buying_permitted(market_regime_8)
         ensemble_weights = re_module.get_ensemble_weights(market_regime_8)
 
-        # Risk thresholds based on regime (Relaxed for Intraday & BTST to allow high-momentum/active stocks)
+        # Risk thresholds based on regime (Tightened for capital preservation as recommended)
         if market_regime_legacy in ["Bear", "Deteriorating"]:
-            risk_threshold = 8.5
+            risk_threshold = 4.2
         elif market_regime_legacy in ["Neutral", "Improving"]:
-            risk_threshold = 9.0
+            risk_threshold = 5.2
         else: # Bull
-            risk_threshold = 9.5
+            risk_threshold = 6.2
 
         survivors = []
         stage1_results = []
@@ -971,6 +989,9 @@ def run_screen(symbols: Optional[List[str]] = None,
             tech_cache = technical_cache_by_symbol[sym]
             
             # Apply Safety Gating:
+            close_price = indicators_by_symbol[sym].get("close", 0)
+            if close_price < getattr(config, "MIN_STOCK_PRICE", 50) or close_price > getattr(config, "MAX_STOCK_PRICE", 10000):
+                continue
             if not tech_cache.get("is_liquid"):
                 continue
             # Disabled overnight gap risk and ATR spike risk since they block high-momentum trading candidates
@@ -1103,7 +1124,7 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         for sym in survivors:
             indic = indicators_by_symbol[sym]
-            fund = fundamentals_by_symbol[sym]
+            fund = fundamentals_by_symbol.get(sym, {})
             ms = structures_by_symbol[sym]
             pcts = percentile_cache_by_symbol[sym]
             df_1y = history_1y.get(sym)
@@ -1219,7 +1240,7 @@ def run_screen(symbols: Optional[List[str]] = None,
                 ev_sample_size = setup_exp.get("sample_size", 0)
 
                 ev_confidence = min(1.0, ev_sample_size / 30.0)
-                ev_weight = 0.30 * ev_confidence
+                ev_weight = 0.10 * ev_confidence  # Reduced from 0.30 due to Expectancy Score degradation
                 alpha_weight = 1.0 - ev_weight
                 ev_score = min(100.0, max(0.0, 50.0 + expectancy * 10.0))
                 final_score = alpha_weight * meta_alpha + ev_weight * ev_score
@@ -1464,7 +1485,8 @@ def run_screen(symbols: Optional[List[str]] = None,
             elif market_regime_legacy in ["Improving", "Neutral"]:
                 passes_dual_filter = (adj_alpha >= 55.0) and (rank_in_universe <= max(3, int(0.15 * N)))
             else:  # Bear or Deteriorating
-                passes_dual_filter = (adj_alpha >= 50.0) and (rank_in_universe <= max(2, int(0.10 * N)))
+                # Capped to 2 to limit market exposure and transaction costs in Bear regimes as recommended
+                passes_dual_filter = (adj_alpha >= 50.0) and (rank_in_universe <= 2)
 
             # Calculate SL and Targets
             entry_price = stock["current_price"]
@@ -1478,9 +1500,17 @@ def run_screen(symbols: Optional[List[str]] = None,
             if not dd_risk["allowed"]:
                 is_confirmed = False
 
-            # Strict Bullish Regime Gating
-            if getattr(config, "STRICT_BULL_ONLY_BUY", False) and not buying_permitted:
+            # Regime Gating:
+            # If STRICT_BULL_ONLY_BUY is True, we block all buys outside of Bull trends.
+            if getattr(config, "STRICT_BULL_ONLY_BUY", False) and not market_is_bullish:
                 is_confirmed = False
+            # If in Bear_Trend or Bear_Panic (buying_permitted is False), we only allow buying
+            # for truly elite, high-conviction leadership candidates to protect capital.
+            elif not buying_permitted:
+                minervini_tier = stock.get("minervini_tier", "Reject")
+                passes_elite_bear_gating = (adj_alpha >= 72.0) and (minervini_tier in ["Elite", "Strong"])
+                if not passes_elite_bear_gating:
+                    is_confirmed = False
 
             # Reality Check validation
             rc_passes = True

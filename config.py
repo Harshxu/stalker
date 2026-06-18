@@ -122,7 +122,34 @@ NIFTY_METAL = "^CNXMETAL"
 # PRICE FILTER
 # ─────────────────────────────────────────────
 MAX_STOCK_PRICE = 5000     # ₹5,000 max per stock (updated user requirement)
-MIN_STOCK_PRICE = 5        # ₹5 min to analyze vast stock system
+MIN_STOCK_PRICE = 100      # ₹100 min — avoids penny stocks where taxes eat all gains
+
+# ─────────────────────────────────────────────
+# INTRADAY STRATEGY PARAMETERS
+# (Used by the three-strategy screener)
+# ─────────────────────────────────────────────
+
+# Strategy 1 — Opening Range Breakout (ORB)
+ORB_RANGE_MINUTES   = 15        # Mark high/low of the first 15 min (9:15–9:30 AM)
+ORB_VOLUME_MULT     = 1.5       # Breakout candle must have 1.5× average volume
+ORB_RR_MIN          = 1.5       # Minimum risk-to-reward for ORB entry
+ORB_MAX_RANGE_PCT   = 0.04      # Reject if opening range > 4% of price (too wide)
+
+# Strategy 2 — VWAP Bounce & Flip
+VWAP_RSI_MIN_LONG   = 50        # RSI must be above 50 for long setups
+VWAP_RSI_MAX_SHORT  = 50        # RSI must be below 50 for short setups
+VWAP_SL_PTS         = 6         # Stop-loss 5-6 pts below VWAP (fixed)
+VWAP_EMA_FAST       = 9         # Fast EMA for VWAP bounce confirmation
+VWAP_EMA_SLOW       = 21        # Slow EMA for VWAP bounce confirmation
+VWAP_MIN_HOLD_TIME  = 30        # Skip VWAP signals before 9:30 AM (30 min after open)
+
+# Strategy 3 — Momentum + Volume Surge
+MOM_VOLUME_SURGE_MIN = 1.5      # Volume must be ≥150% of 20-day average
+MOM_RSI_ENTRY_MIN   = 50        # RSI entry zone lower bound
+MOM_RSI_ENTRY_MAX   = 65        # RSI entry zone upper bound (not already overbought)
+MOM_RSI_AVOID_ABOVE = 75        # Avoid entry if RSI > 75 (chasing)
+MOM_BASE_WAIT_MIN   = 30        # Wait 30 min after open before entry
+MOM_PROFIT_PARTIAL  = 0.50      # Book 50% at first target
 
 # ─────────────────────────────────────────────
 # PHASE 1 ELITE ARCHITECTURE: 8 ADAPTIVE REGIMES
@@ -133,14 +160,14 @@ MIN_STOCK_PRICE = 5        # ₹5 min to analyze vast stock system
 # Ensemble sub-model base weights (sum = 1.0)
 # Momentum | Quality | Institutional | Catalyst
 ENSEMBLE_WEIGHTS = {
-    "Bull_Trend":        {"momentum": 0.50, "quality": 0.05, "institutional": 0.40, "catalyst": 0.05},
-    "Bull_Expansion":    {"momentum": 0.55, "quality": 0.05, "institutional": 0.38, "catalyst": 0.02},
-    "Bull_Exhaustion":   {"momentum": 0.40, "quality": 0.10, "institutional": 0.45, "catalyst": 0.05},
-    "Neutral_Rotation":  {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
-    "Neutral_Compression": {"momentum": 0.40, "quality": 0.10, "institutional": 0.45, "catalyst": 0.05},
-    "Bear_Trend":        {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
-    "Bear_Panic":        {"momentum": 0.35, "quality": 0.10, "institutional": 0.50, "catalyst": 0.05},
-    "Bear_Recovery":     {"momentum": 0.45, "quality": 0.10, "institutional": 0.40, "catalyst": 0.05},
+    "Bull_Trend":        {"momentum": 0.53, "quality": 0.02, "institutional": 0.43, "catalyst": 0.02},
+    "Bull_Expansion":    {"momentum": 0.58, "quality": 0.01, "institutional": 0.40, "catalyst": 0.01},
+    "Bull_Exhaustion":   {"momentum": 0.44, "quality": 0.02, "institutional": 0.52, "catalyst": 0.02},
+    "Neutral_Rotation":  {"momentum": 0.49, "quality": 0.02, "institutional": 0.47, "catalyst": 0.02},
+    "Neutral_Compression": {"momentum": 0.44, "quality": 0.02, "institutional": 0.52, "catalyst": 0.02},
+    "Bear_Trend":        {"momentum": 0.50, "quality": 0.02, "institutional": 0.46, "catalyst": 0.02},
+    "Bear_Panic":        {"momentum": 0.41, "quality": 0.02, "institutional": 0.55, "catalyst": 0.02},
+    "Bear_Recovery":     {"momentum": 0.50, "quality": 0.02, "institutional": 0.46, "catalyst": 0.02},
 }
 
 # Mapping from 8-state regime to legacy 3-state for backward compatibility
@@ -234,7 +261,7 @@ IDEAL_RISK_REWARD = 2.0    # Ideal R:R ratio (1:2)
 ACCOUNT_SIZE = 1000000.0   # Default ₹10 Lakhs account size
 RISK_PER_TRADE_PCT = 0.02  # Risk max 2% of capital per trade
 MAX_CAPITAL_RISK_PCT = 0.02  # Keeping for backward compatibility
-PORTFOLIO_MAX_RISK_PCT = 0.06 # Max portfolio risk exposure
+PORTFOLIO_MAX_RISK_PCT = 0.30 # Max portfolio risk exposure (increased from 6% to 30% to avoid blocking recommendations)
 STOP_LOSS_ATR_MULT = 2.0   # Stop loss = 2.0x ATR below entry (wider to avoid noise triggers)
 DAILY_LOSS_LIMIT_PCT = 0.03  # Stop trading after 3% daily drawdown
 STRICT_BULL_ONLY_BUY = False   # Force all picks to WATCH when market trend is Neutral or Bear (set to False to allow top leadership picks in Neutral/Improving regimes)
@@ -295,5 +322,11 @@ LEADERSHIP_FINAL_WEIGHTS = {
 # DASHBOARD SERVER
 # ─────────────────────────────────────────────
 DASHBOARD_PORT = int(os.getenv("PORT", 8000))
+
+# ─────────────────────────────────────────────
+# EMAIL DISPATCH CONTROL
+# ─────────────────────────────────────────────
+DISABLE_SUBSCRIBER_EMAILS = True  # Set to True to temporarily stop all subscriber emails (morning & evening)
+
 
 
