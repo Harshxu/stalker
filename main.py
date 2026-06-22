@@ -190,8 +190,14 @@ def run_premarket_analysis():
     logger.info("Pre-market analysis started at 7:00 AM")
 
     try:
-        # Run the full screener — full universe, all indicators
-        result = screener.run_screen(top_n=config.TOP_PICKS_COUNT, dry_run=IS_DRY_RUN)
+        # Dynamically download the latest NSE listed equities segment
+        try:
+            update_universe_symbols()
+        except Exception as uni_err:
+            logger.warning(f"Could not update dynamic universe: {uni_err}. Falling back to cached list.")
+
+        active_universe = config.get_scan_universe()
+        result = screener.run_screen(symbols=active_universe, top_n=config.TOP_PICKS_COUNT, dry_run=IS_DRY_RUN)
         _today_scan_result = result
 
         picks = result.get("top_picks", [])
@@ -837,7 +843,62 @@ def generate_eod_report():
 
 # ─────────────────────────────────────────────
 # HELPERS
-# ─────────────────────────────────────────────
+def update_universe_symbols() -> bool:
+    """
+    Fetch the list of all NSE-listed equity securities,
+    filter for standard common equities (Series 'EQ'),
+    append '.NS' suffix, merge with custom BSE-listed symbols,
+    and save to data/universe_symbols.json.
+    """
+    url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    logger.info("Updating stock universe dynamically from NSE...")
+    try:
+        import io
+        import json
+        import pandas as pd
+        
+        resp = requests.get(url, headers=headers, timeout=15)
+        if resp.status_code != 200:
+            logger.error(f"Failed to fetch stock universe from NSE: HTTP {resp.status_code}")
+            return False
+            
+        df = pd.read_csv(io.StringIO(resp.text))
+        
+        # Clean up column names (strip whitespace)
+        df.columns = [col.strip() for col in df.columns]
+        
+        # Filter for standard equities (SERIES == 'EQ')
+        df_filtered = df[df['SERIES'].str.strip() == 'EQ']
+        
+        nse_symbols = df_filtered['SYMBOL'].str.strip().tolist()
+        nse_tickers = [f"{sym}.NS" for sym in nse_symbols if sym]
+        
+        # Merge with custom BSE symbols (filter out if NSE equivalent exists)
+        nse_base_symbols = {sym.replace(".NS", "") for sym in nse_tickers}
+        bse_tickers = [sym.strip().upper() for sym in getattr(config, "BSE_SYMBOLS", []) if sym]
+        bse_tickers_filtered = [sym for sym in bse_tickers if sym.replace(".BO", "") not in nse_base_symbols]
+        all_tickers = sorted(list(set(nse_tickers + bse_tickers_filtered)))
+        
+        if not all_tickers:
+            logger.error("Parsed ticker list is empty. Aborting update.")
+            return False
+            
+        # Write to JSON file
+        json_path = os.path.join(config.DATA_DIR, "universe_symbols.json")
+        with open(json_path, "w") as f:
+            json.dump(all_tickers, f, indent=2)
+            
+        logger.info(f"Successfully updated universe: {len(all_tickers)} total symbols saved (including {len(bse_tickers)} BSE custom symbols).")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error updating universe symbols: {e}", exc_info=True)
+        return False
+
 
 def _send_via_brevo(subject: str, html_body: str, admin_only: bool = False) -> bool:
     if getattr(config, "DISABLE_SUBSCRIBER_EMAILS", False) and not admin_only:
@@ -1754,9 +1815,23 @@ if __name__ == "__main__":
                         help="Your trading capital in ₹ (default: ₹1,0,000)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Run full calculations but bypass database writes, checkpoint updates, and email dispatches.")
+    parser.add_argument("--update-universe", action="store_true",
+                        help="Manually fetch all listed NSE common equities and update data/universe_symbols.json.")
     args = parser.parse_args()
 
     IS_DRY_RUN = args.dry_run
+
+    if args.update_universe:
+        print("Updating stock universe...")
+        success = update_universe_symbols()
+        if success:
+            print("Universe updated successfully.")
+        else:
+            print("Failed to update universe.")
+            import sys
+            sys.exit(1)
+        import sys
+        sys.exit(0)
 
     print("""
 +-------------------------------------------+

@@ -90,23 +90,32 @@ MIDCAP_SYMBOLS = [
 # BSE-listed stocks for broader coverage
 BSE_SYMBOLS = [
     # Banking & NBFCs
-    "IDFCFIRSTB.BO", "FEDERALBNK.BO", "BANDHANBNK.BO", "RBLBANK.BO",
-    "LICHSGFIN.BO",  "MUTHOOTFIN.BO", "MANAPPURAM.BO", "CHOLAFIN.BO",
-    "ABCAPITAL.BO",  "BAJAJHFL.BO",
+    "CHOLAFIN.BO",   "ABCAPITAL.BO",  "BAJAJHFL.BO",
     # Consumer & FMCG
     "GODREJCP.BO",   "EMAMILTD.BO",   "VBL.BO",        "JUBLFOOD.BO",
     "BERGEPAINT.BO",
-    # IT & Tech
-    "PERSISTENT.BO", "COFORGE.BO",    "LTM.BO",        "TATAELXSI.BO",
     # Infrastructure & Manufacturing
     "POLYCAB.BO",    "HAVELLS.BO",    "VOLTAS.BO",     "CROMPTON.BO",
     "ASTRAL.BO",     "KAJARIACER.BO", "SUPREMEIND.BO",
-    # Pharma
-    "ZYDUSLIFE.BO",  "ALKEM.BO",
 ]
 
 # Full universe to scan — NSE + BSE combined
 ALL_SYMBOLS = NIFTY50_SYMBOLS + MIDCAP_SYMBOLS + BSE_SYMBOLS
+
+def get_scan_universe():
+    """Get the active list of symbols to scan. Loads from JSON if available, otherwise falls back to static list."""
+    import json
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    json_path = os.path.join(base_dir, "data", "universe_symbols.json")
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, "r") as f:
+                syms = json.load(f)
+                if isinstance(syms, list) and len(syms) > 0:
+                    return syms
+        except Exception:
+            pass
+    return ALL_SYMBOLS
 
 # Market & Sector indices
 NIFTY_INDEX = "^NSEI"

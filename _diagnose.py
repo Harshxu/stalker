@@ -84,18 +84,19 @@ print(f"    Buying permitted by regime? {buying}")
 print(f"    Min alpha score needed:     {'80.0' if legacy == 'Bear' else '75.0' if legacy == 'Neutral' else '70.0'}")
 print(f"    Max rank allowed:           Top {'3%' if legacy == 'Bear' else '5%' if legacy == 'Neutral' else '10%'} of universe")
 print(f"    Min R:R ratio needed:       1.5x")
-print(f"    Account DD:                 14.6% → sizing at 25% (still allowed)")
+print(f"    Account DD:                 14.6% -> sizing at 25% (still allowed)")
 
 # 5. Today's scores check
 print(f"\n[5] TODAY'S SCORE PROBLEM (from last scan)")
 print(f"    8 stocks qualified Stage 1 from 188")
-print(f"    Top score: APOLLOHOSP 67.4  → needs 80.0 in Bear → FAILS")
+print(f"    Top score: APOLLOHOSP 67.4  -> needs 80.0 in Bear -> FAILS")
 print(f"    With only 8 qualifiers, top 3% = max(1, int(0.03*8)) = 1 stock can even be considered")
-print(f"    But score 67.4 < 80.0 → no BUY regardless")
+print(f"    But score 67.4 < 80.0 -> no BUY regardless")
 
+# 6. ROOT CAUSE SUMMARY
 print(f"\n[6] ROOT CAUSE SUMMARY")
 if not buying:
-    print(f"    REGIME GATE: {regime_8} → buying_permitted=False")
+    print(f"    REGIME GATE: {regime_8} -> buying_permitted=False")
     print(f"    Even if a stock scored 100, it would be WATCH in this regime")
 print(f"    BREADTH GATE: Only {b50:.0f}% of stocks above EMA50 (need >60% for Bull)")
 print(f"    SCORE GATE:   Highest score {67.4} < 80.0 threshold for Bear regime")

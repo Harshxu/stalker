@@ -570,8 +570,9 @@ def run_screen(symbols: Optional[List[str]] = None,
     Automated Alpha Engine v5.0 Systematic Quant Engine screening pipeline (Stalker V2).
     """
     start_time = datetime.now()
-    symbols = symbols or config.ALL_SYMBOLS
+    symbols = symbols or config.get_scan_universe()
     today_str = datetime.now().strftime("%Y-%m-%d")
+    total_universe_count = len(symbols)
     
     logger.info(f"Initiating STALKER V2 Staged Pipeline across {len(symbols)} stocks (Dry Run: {dry_run})...")
 
@@ -598,31 +599,59 @@ def run_screen(symbols: Optional[List[str]] = None,
         logger.info("Executing Stage 1: Fundamentals Refresh...")
         stage1_start = time.time()
         
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         valid_fundamentals = 0
         fundamentals_by_symbol = {}
+        successfully_fetched_count = 0
         
-        for symbol in symbols:
-            # Check Watchdog timeout
-            if time.time() - stage1_start > stage_timeout:
-                raise RuntimeError("Watchdog timeout in Stage 1 (> 5 minutes)")
-                
+        def fetch_single(sym):
             try:
-                fund = df_module.fetch_fundamentals(symbol)
-                # Check if we got valid fundamentals data
-                if fund and (fund.get("market_cap", 0) > 0 or fund.get("sector") != "Unknown"):
-                    valid_fundamentals += 1
-                    fundamentals_by_symbol[symbol] = fund
-                    if not dry_run:
-                        db_manager.save_cached_fundamental(symbol, fund)
-            except Exception as e:
-                logger.error(f"Error fetching fundamentals for {symbol}: {e}")
+                fund = df_module.fetch_fundamentals(sym)
+                return sym, fund
+            except Exception as ex:
+                logger.error(f"Error fetching fundamentals for {sym}: {ex}")
+                return sym, None
+
+        logger.info(f"Fetching fundamentals for {len(symbols)} symbols using parallel workers...")
         
-        # Check fundamentals data coverage (< 80%)
-        coverage = (valid_fundamentals / len(symbols)) if symbols else 0.0
-        logger.info(f"Stage 1 Fundamentals Refresh complete. Coverage: {coverage*100:.1f}% ({valid_fundamentals}/{len(symbols)})")
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = {executor.submit(fetch_single, sym): sym for sym in symbols}
+            for future in as_completed(futures):
+                # Check Watchdog timeout
+                if time.time() - stage1_start > stage_timeout:
+                    raise RuntimeError("Watchdog timeout in Stage 1 (> 5 minutes)")
+                
+                sym, fund = future.result()
+                if fund and isinstance(fund, dict):
+                    successfully_fetched_count += 1
+                    
+                    # Cache in DB if not dry run
+                    if not dry_run and (fund.get("market_cap", 0) > 0 or fund.get("sector") != "Unknown"):
+                        try:
+                            db_manager.save_cached_fundamental(sym, fund)
+                        except Exception as db_err:
+                            logger.error(f"Failed to cache fundamentals in DB for {sym}: {db_err}")
+                    
+                    # Apply early price filter
+                    current_price = fund.get("current_price") or fund.get("52w_high") or 0
+                    min_price = getattr(config, "MIN_STOCK_PRICE", 100)
+                    max_price = getattr(config, "MAX_STOCK_PRICE", 5000)
+                    
+                    if min_price <= current_price <= max_price:
+                        fundamentals_by_symbol[sym] = fund
+                        valid_fundamentals += 1
+
+        # Check fundamentals data coverage (< 80%) based on successfully fetched symbols
+        coverage = (successfully_fetched_count / len(symbols)) if symbols else 0.0
+        logger.info(f"Stage 1 Fundamentals Refresh complete. Successfully fetched: {successfully_fetched_count}/{len(symbols)} ({coverage*100:.1f}% coverage)")
+        logger.info(f"Early Price Gating: {valid_fundamentals} symbols are within range (₹{getattr(config, 'MIN_STOCK_PRICE', 100)} to ₹{getattr(config, 'MAX_STOCK_PRICE', 5000)})")
         
         if coverage < 0.80:
             raise RuntimeError(f"Fundamentals data coverage {coverage*100:.1f}% is < 80% threshold")
+
+        # Update symbols list to only contain price-gated survivors for subsequent stages
+        symbols = list(fundamentals_by_symbol.keys())
 
         # Load Nifty index data
         indices_data = df_module.fetch_market_indices()
@@ -635,6 +664,13 @@ def run_screen(symbols: Optional[List[str]] = None,
         # ─────────────────────────────────────────────
         logger.info("Executing Stage 2: Technical Indicators calculation (Batch-based)...")
         stage2_start = time.time()
+
+        # Clear rate limit cooldown before starting Stage 2 to ensure we attempt history fetch
+        try:
+            import data_fetcher
+            data_fetcher._rate_limit_cooldown_until = 0.0
+        except Exception as e:
+            logger.debug(f"Failed to reset rate limit cooldown: {e}")
 
         dry_run_tech_records = []
         chunk_size = 25
@@ -961,8 +997,10 @@ def run_screen(symbols: Optional[List[str]] = None,
                 advances += 1
             else:
                 declines += 1
-        total_breadth = advances + declines
-        ad_ratio_computed = (advances / total_breadth) if total_breadth > 0 else 0.5
+        if declines == 0:
+            ad_ratio_computed = 2.0 if advances > 0 else 1.0
+        else:
+            ad_ratio_computed = round(advances / declines, 2)
 
         # Call regime Engine to get weights with precalculated ad_ratio
         market_regime_8, market_is_risk_on, regime_data = re_module.classify_regime(
@@ -1649,7 +1687,7 @@ def run_screen(symbols: Optional[List[str]] = None,
             "account_drawdown_pct": account_dd,
             "market_pulse":         market_pulse_data,
             "top_picks":            portfolio,
-            "scanned":              len(symbols),
+            "scanned":              total_universe_count,
             "qualified":            len(processed_candidates),
             "elapsed_sec":          elapsed,
         }
@@ -1667,7 +1705,7 @@ def run_screen(symbols: Optional[List[str]] = None,
             "date": today_str,
             "scan_time": datetime.now().strftime("%H:%M:%S"),
             "top_picks": [],
-            "scanned": len(symbols),
+            "scanned": total_universe_count,
             "qualified": 0,
         }
 

@@ -256,12 +256,12 @@ def is_nse_holiday(dt: date) -> bool:
 # OHLCV Data Fetcher
 # ─────────────────────────────────────────────
 
-def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d") -> Optional[pd.DataFrame]:
+def fetch_stock_history(symbol: str, period: str = "3mo", interval: str = "1d", bypass_cooldown: bool = False) -> Optional[pd.DataFrame]:
     """
     Fetch historical OHLCV data for a stock.
     Returns DataFrame with columns: Open, High, Low, Close, Volume
     """
-    if is_rate_limited():
+    if not bypass_cooldown and is_rate_limited():
         logger.debug(f"Skipping history fetch for {symbol} due to active rate-limit cooldown.")
         return None
 
@@ -376,9 +376,10 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
 
 def fetch_market_indices() -> Dict[str, Optional[pd.DataFrame]]:
     """
-    Fetch data for NIFTY 50 and key sector indices.
+    Fetch data for NIFTY 50 and key sector indices with automatic cache backup for high resilience.
     Used to determine overall market + sector strength.
     """
+    from datetime import date
     indices = {
         "NIFTY50": config.NIFTY_INDEX,
         "BANKNIFTY": config.BANK_NIFTY,
@@ -391,11 +392,66 @@ def fetch_market_indices() -> Dict[str, Optional[pd.DataFrame]]:
     }
 
     result = {}
+    fetched_any = False
+    
+    # Try fetching with cooldown bypassed
     for name, symbol in indices.items():
-        df = fetch_stock_history(symbol, period="1y")
-        result[name] = df
+        try:
+            df = fetch_stock_history(symbol, period="1y", bypass_cooldown=True)
+            if df is not None and not df.empty:
+                result[name] = df
+                fetched_any = True
+            else:
+                result[name] = None
+        except Exception as e:
+            logger.error(f"Error fetching index {name} ({symbol}): {e}")
+            result[name] = None
         time.sleep(0.2)
 
+    # Cache file path
+    cache_file = os.path.join(config.DATA_DIR, "indices_cache.json")
+
+    # If we successfully fetched at least some indices, cache them and fill in gaps
+    if fetched_any:
+        # Load existing cache to fill in any indices that failed this time
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    cache_data = json.load(f)
+                for name, df_json in cache_data.get("data", {}).items():
+                    if result.get(name) is None and df_json:
+                        result[name] = pd.read_json(df_json, orient="split")
+                        logger.info(f"Loaded index {name} from cache fallback")
+            except Exception as cache_err:
+                logger.error(f"Failed to load cached indices for fallback: {cache_err}")
+
+        # Save successfully fetched results to cache
+        cache_to_save = {}
+        for name, df in result.items():
+            if df is not None and not df.empty:
+                cache_to_save[name] = df.to_json(orient="split")
+        
+        try:
+            with open(cache_file, "w") as f:
+                json.dump({"date": str(date.today()), "data": cache_to_save}, f, indent=2)
+        except Exception as save_err:
+            logger.error(f"Failed to save indices cache: {save_err}")
+    else:
+        # All fetches failed! Load completely from cache
+        logger.warning("All market index fetches failed. Attempting full cache fallback...")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r") as f:
+                    cache_data = json.load(f)
+                for name, df_json in cache_data.get("data", {}).items():
+                    if df_json:
+                        result[name] = pd.read_json(df_json, orient="split")
+                logger.info("Successfully recovered all indices from local cache fallback.")
+            except Exception as cache_err:
+                logger.critical(f"Failed to load indices from cache fallback: {cache_err}")
+        else:
+            logger.critical("No local indices cache file found to recover indices!")
+        
     return result
 
 
