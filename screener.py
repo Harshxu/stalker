@@ -548,6 +548,46 @@ def get_active_open_positions_heat() -> float:
     return active_count * risk_per_trade_pct
 
 
+def get_recent_pick_counts(lookback_days: int = 5) -> dict:
+    """
+    Returns a dict of {symbol: days_appeared} for picks in the last N days.
+    Used to penalise stocks that keep appearing in picks without fresh momentum.
+    Staleness = same stock in top picks for 3+ consecutive days signals the
+    screener is anchoring on large-cap liquidity (BIOCON, BHARTIARTL, LT etc.)
+    rather than fresh intraday momentum signals.
+    """
+    from datetime import date, timedelta
+    counts = {}
+    db = db_manager.get_db()
+    records = []
+    try:
+        if db is not None:
+            col = db[config.MONGO_COLLECTION_PICKS]
+            min_date = str(date.today() - timedelta(days=lookback_days))
+            records = list(col.find({"date": {"$gte": min_date}}, sort=[("date", 1)]))
+    except Exception:
+        pass
+    if not records:
+        try:
+            all_records = db_manager._read_json("daily_picks.json")
+            min_date = str(date.today() - timedelta(days=lookback_days))
+            records = [r for r in all_records if r.get("date", "") >= min_date]
+            records.sort(key=lambda r: r.get("date", ""))
+        except Exception:
+            pass
+    today_str = str(date.today())
+    for rec in records:
+        rec_date = rec.get("date", "")
+        if rec_date == today_str:
+            continue  # Don't count today's own run against itself
+        picks_list = rec.get("picks", rec.get("top_picks", []))
+        for p in picks_list:
+            sym = p.get("symbol", "")
+            if sym:
+                counts[sym] = counts.get(sym, 0) + 1
+    return counts
+
+
 def compute_percentiles(raw_map: Dict[str, float]) -> Dict[str, float]:
     """Helper to compute percentile ranks (0-100) dynamically across a raw value map."""
     if not raw_map:
@@ -1012,13 +1052,14 @@ def run_screen(symbols: Optional[List[str]] = None,
         buying_permitted = re_module.is_buying_permitted(market_regime_8)
         ensemble_weights = re_module.get_ensemble_weights(market_regime_8)
 
-        # Risk thresholds based on regime (Tightened for capital preservation as recommended)
+        # Risk thresholds based on regime — raised to allow intraday momentum stocks
+        # (formula: atr_pct*150 + max_dd*15 gives 5–8 for healthy liquid stocks)
         if market_regime_legacy in ["Bear", "Deteriorating"]:
-            risk_threshold = 4.2
+            risk_threshold = 5.5
         elif market_regime_legacy in ["Neutral", "Improving"]:
-            risk_threshold = 5.2
+            risk_threshold = 6.5
         else: # Bull
-            risk_threshold = 6.2
+            risk_threshold = 7.5
 
         survivors = []
         stage1_results = []
@@ -1160,6 +1201,13 @@ def run_screen(symbols: Optional[List[str]] = None,
         pulse_score = market_pulse_data["pulse_score"]
         downgrade_buy = market_pulse_data["downgrade_buy"]
 
+        # Load recent pick history to apply recency penalty (anti-staleness filter)
+        recent_pick_counts = get_recent_pick_counts(lookback_days=5)
+        if recent_pick_counts:
+            stale_symbols = [s for s, c in recent_pick_counts.items() if c >= 3]
+            if stale_symbols:
+                logger.info(f"[RECENCY] Stale stocks (3+ days in picks): {stale_symbols}")
+
         for sym in survivors:
             indic = indicators_by_symbol[sym]
             fund = fundamentals_by_symbol.get(sym, {})
@@ -1203,6 +1251,29 @@ def run_screen(symbols: Optional[List[str]] = None,
                     opp_score = calculate_opportunity_score(df_3mo, indic, ms)
                 else:
                     opp_score = 50.0
+
+                # ── INTRADAY MOMENTUM BOOST ────────────────────────────────
+                # When a stock shows the classic intraday BUY signal pattern:
+                # volume surge + RSI in healthy zone + above VWAP + EMA aligned
+                # This directly rewards what actually goes up intraday.
+                intraday_momentum_boost = 0.0
+                _vol_ratio_now  = float(indic.get("volume_ratio", 1.0))
+                _rsi_now        = float(indic.get("rsi", 50.0))
+                _above_vwap_now = bool(indic.get("above_vwap", False))
+                _ema_aligned_now = bool(indic.get("ema_aligned", False))
+                _ema_slope_up   = bool(indic.get("ema_slope_up", False))
+                _macd_bullish   = bool(indic.get("macd_bullish", False))
+
+                if _vol_ratio_now >= 1.5 and 50 <= _rsi_now <= 75 and _above_vwap_now and _ema_aligned_now:
+                    intraday_momentum_boost += 10.0   # Core intraday pattern confirmed
+                    if _ema_slope_up:
+                        intraday_momentum_boost += 3.0   # Trend accelerating
+                    if _macd_bullish:
+                        intraday_momentum_boost += 3.0   # MACD confirming
+                    if _vol_ratio_now >= 2.0:
+                        intraday_momentum_boost += 4.0   # Exceptional volume surge
+                elif _vol_ratio_now >= 1.8 and _above_vwap_now and 48 <= _rsi_now <= 78:
+                    intraday_momentum_boost += 5.0   # Partial intraday signal
 
                 structure = ms.get("structure", "sideways")
                 ms_strength = ms.get("strength", 0)
@@ -1285,7 +1356,20 @@ def run_screen(symbols: Optional[List[str]] = None,
 
                 # Penalties
                 penalty = calculate_penalties(fund, indic)
-                adjusted_alpha = final_score + penalty
+                adjusted_alpha = final_score + penalty + intraday_momentum_boost
+                adjusted_alpha = min(100.0, adjusted_alpha)
+
+                # ── RECENCY PENALTY ────────────────────────────────────────
+                # Penalise stocks that have appeared in top picks for 3+ consecutive
+                # days without significant price action. Large-cap stalwarts like
+                # BIOCON, BHARTIARTL, LT, JSWSTEEL, FEDERALBNK always pass
+                # liquidity + data-quality checks but offer no fresh signal.
+                # Penalty: -5 pts per day beyond 2 consecutive appearances, max -20
+                repeat_days = recent_pick_counts.get(sym, 0)
+                if repeat_days >= 3:
+                    repeat_penalty = min(20.0, (repeat_days - 2) * 5.0)
+                    adjusted_alpha = max(0.0, adjusted_alpha - repeat_penalty)
+                    logger.debug(f"[RECENCY] {sym} appeared {repeat_days}d in a row — penalty −{repeat_penalty:.0f} pts → alpha {adjusted_alpha:.1f}")
 
                 # Leadership Boost
                 leadership_boost = 0.0
@@ -1516,14 +1600,16 @@ def run_screen(symbols: Optional[List[str]] = None,
             rank_in_universe = idx + 1
             adj_alpha = stock["adjusted_alpha"]
 
-            # Dual quality-percentile filters (Relaxed for Intraday & BTST to allow momentum leaders to trigger)
+            # Dual quality-percentile filters (intraday-calibrated thresholds)
             passes_dual_filter = False
             if market_regime_legacy == "Bull":
-                passes_dual_filter = (adj_alpha >= 60.0) and (rank_in_universe <= max(5, int(0.25 * N)))
+                # Bull: alpha >= 52, top 35% of universe
+                passes_dual_filter = (adj_alpha >= 52.0) and (rank_in_universe <= max(5, int(0.35 * N)))
             elif market_regime_legacy in ["Improving", "Neutral"]:
-                passes_dual_filter = (adj_alpha >= 55.0) and (rank_in_universe <= max(3, int(0.15 * N)))
+                # Neutral: alpha >= 48, top 25% of universe
+                passes_dual_filter = (adj_alpha >= 48.0) and (rank_in_universe <= max(3, int(0.25 * N)))
             else:  # Bear or Deteriorating
-                # Capped to 2 to limit market exposure and transaction costs in Bear regimes as recommended
+                # Bear: keep strict — only the very best 2 picks
                 passes_dual_filter = (adj_alpha >= 50.0) and (rank_in_universe <= 2)
 
             # Calculate SL and Targets
@@ -1532,7 +1618,7 @@ def run_screen(symbols: Optional[List[str]] = None,
             targets_dict = rm.calculate_targets(entry_price, sl_price)
             rr_ratio_val = targets_dict.get("rr_ratio")
             
-            is_confirmed = passes_dual_filter and (rr_ratio_val is not None and rr_ratio_val >= 1.5)
+            is_confirmed = passes_dual_filter and (rr_ratio_val is not None and rr_ratio_val >= 1.2)
 
             # Drawdown halt overrides BUY
             if not dd_risk["allowed"]:
@@ -1569,9 +1655,9 @@ def run_screen(symbols: Optional[List[str]] = None,
                 action_color = "yellow"
                 stock["execution_rule"] = "Kill Switch Active — Strict Watchlist Only."
             elif downgrade_buy and action_val == "BUY":
-                # Pulse downgrade applies only to weaker setups (score < 70.0) in weak markets
-                # to allow high-conviction momentum leaders to decouple and trigger BUY
-                if adj_alpha < 70.0:
+                # Pulse downgrade: only block weaker setups (alpha < 60) in clearly weak markets
+                # Stocks with alpha >= 60 with confirmed momentum should still trigger BUY
+                if adj_alpha < 60.0:
                     action_val = "WATCH"
                     action_color = "yellow"
                     stock["execution_rule"] = f"Pulse Gate: Sellers dominant today (Pulse={pulse_score:.0f}/100). Wait for buyer confirmation."

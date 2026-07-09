@@ -250,7 +250,7 @@ EMA_SHORT = 20
 EMA_LONG  = 50
 RSI_PERIOD = 14
 RSI_MIN = 45          # Below this = weakness
-RSI_MAX = 78          # Above this = overbought
+RSI_MAX = 80          # Above this = overbought (relaxed slightly for intraday momentum leaders)
 VOLUME_SURGE_RATIO = 1.8   # Volume should be 1.8x 20-day average
 VOLUME_LOOKBACK = 20       # Days for average volume
 GAP_UP_THRESHOLD = 1.5    # Minimum gap up % to flag as Gap&Go
@@ -265,15 +265,15 @@ MIN_SWING_MOVE = 0.01      # Minimum 1% move to qualify as swing
 # ─────────────────────────────────────────────
 # RISK MANAGEMENT SETTINGS (from PROMPT.txt)
 # ─────────────────────────────────────────────
-MIN_RISK_REWARD = 1.5      # Minimum R:R ratio (1:1.5)
+MIN_RISK_REWARD = 1.2      # Minimum R:R ratio — lowered to 1.2 for intraday (realistic for tight entry zones)
 IDEAL_RISK_REWARD = 2.0    # Ideal R:R ratio (1:2)
 ACCOUNT_SIZE = 1000000.0   # Default ₹10 Lakhs account size
 RISK_PER_TRADE_PCT = 0.02  # Risk max 2% of capital per trade
 MAX_CAPITAL_RISK_PCT = 0.02  # Keeping for backward compatibility
 PORTFOLIO_MAX_RISK_PCT = 0.30 # Max portfolio risk exposure (increased from 6% to 30% to avoid blocking recommendations)
-STOP_LOSS_ATR_MULT = 2.0   # Stop loss = 2.0x ATR below entry (wider to avoid noise triggers)
+STOP_LOSS_ATR_MULT = 1.5   # Stop loss = 1.5x ATR below entry — tighter for intraday (better R:R, faster exit)
 DAILY_LOSS_LIMIT_PCT = 0.03  # Stop trading after 3% daily drawdown
-STRICT_BULL_ONLY_BUY = False   # Force all picks to WATCH when market trend is Neutral or Bear (set to False to allow top leadership picks in Neutral/Improving regimes)
+STRICT_BULL_ONLY_BUY = False   # Allow buys in Neutral/Improving regimes for top leadership picks
 
 # Kill Switch Settings
 KILL_SWITCH_LOSS_COUNT = 5 # Number of consecutive losses to trigger switch

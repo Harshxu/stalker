@@ -30,7 +30,7 @@ VIX_LOW    = 13.0   # VIX below this = calm market, buyers confident
 VIX_HIGH   = 20.0   # VIX above this = fear, sellers active
 VIX_PANIC  = 25.0   # VIX above this = panic selling
 
-PULSE_DOWNGRADE_THRESHOLD = 35.0   # Below this → downgrade BUY to WATCH
+PULSE_DOWNGRADE_THRESHOLD = 28.0   # Below this → downgrade BUY to WATCH (raised bar: only in genuine panic/crash conditions)
 
 
 # ── Signal 1: India VIX ──────────────────────────────────────
