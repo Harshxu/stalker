@@ -1616,6 +1616,22 @@ def run_screen(symbols: Optional[List[str]] = None,
             
             is_confirmed = passes_dual_filter and (rr_ratio_val is not None and rr_ratio_val >= 1.2)
 
+            # Setup-specific alpha minimum gate
+            # Failing setups need higher conviction score to get a BUY
+            trade_type_for_gate = stock.get("trade_type", "WATCHLIST_ONLY")
+            # Use effective_trade_type from meta model if strategy was replaced
+            meta_info_gate = stock.get("meta_info", {})
+            if meta_info_gate.get("is_degraded") and meta_info_gate.get("effective_trade_type"):
+                trade_type_for_gate = meta_info_gate["effective_trade_type"]
+            setup_min_alpha_map = getattr(config, "SETUP_MIN_ALPHA", {})
+            setup_min_alpha = setup_min_alpha_map.get(trade_type_for_gate, 50.0)
+            if is_confirmed and adj_alpha < setup_min_alpha:
+                is_confirmed = False
+                logger.debug(
+                    f"[SETUP_GATE] {stock['symbol']} ({trade_type_for_gate}): "
+                    f"alpha {adj_alpha:.1f} < min {setup_min_alpha:.0f} — downgraded to WATCH"
+                )
+
             # Drawdown halt overrides BUY
             if not dd_risk["allowed"]:
                 is_confirmed = False
@@ -1667,21 +1683,23 @@ def run_screen(symbols: Optional[List[str]] = None,
             stock["reality_check_notes"] = rc_notes
             stock["drawdown_info"] = {"account_dd_pct": account_dd, "risk_multiplier": dd_risk["multiplier"]}
 
-            # Execution rules
+            # Execution rules — instructions per setup type
             if action_val == "BUY":
-                trade_type = stock["trade_type"]
-                if trade_type == "BREAKOUT":
-                    execution_rule = "Buy ONLY if price breaks above today's VWAP on 15m chart with high volume (vol ratio > 1.8x) after 9:30 AM."
-                elif trade_type == "PULLBACK":
-                    execution_rule = "Buy near 20 EMA on 15m chart ONLY when a green support bounce candle forms with low volume."
-                elif trade_type == "MOMENTUM":
-                    execution_rule = "Buy ONLY if today's 9:15 AM Open equals today's Low (OHL Long setup). Skip if it dips below Open."
-                elif trade_type == "VALUE_MOMENTUM":
-                    execution_rule = "Buy near swing support when RSI shows bullish divergence and volume increases."
+                trade_type = stock.get("meta_info", {}).get("effective_trade_type") or stock.get("trade_type", "")
+                if trade_type == "VALUE_MOMENTUM":
+                    execution_rule = "Buy near swing support when RSI shows bullish divergence and volume expands. Quality stock in uptrend — hold for full target."
+                elif trade_type == "INSTITUTIONAL_BREAKOUT":
+                    execution_rule = "Buy only when CMF > 0.08 and price holds above VWAP for 2 consecutive 15m candles after 9:30 AM. Institutions are driving this — ride with them."
+                elif trade_type == "QUALITY_TREND":
+                    execution_rule = "Buy on a shallow pullback to 20 EMA in an established uptrend. Fundamentally strong business — only enter if RSI is not overbought (< 72)."
+                elif trade_type == "VWAP_RECLAIM":
+                    execution_rule = "Buy only when price crosses and HOLDS above VWAP with increasing volume. Wait for a full 15m candle close above VWAP before entering."
+                elif trade_type == "BREAKOUT":
+                    execution_rule = "Buy ONLY if price breaks above today's high on 15m chart with vol ratio > 1.8x after 9:30 AM. False breakouts are common — wait for confirmation candle."
                 elif trade_type == "EARNINGS_RUNNER":
-                    execution_rule = "Buy on confirmed post-earnings trend continuation. Confirm breakout with 1.8x volume."
+                    execution_rule = "Buy on confirmed post-earnings continuation ONLY if stock holds gap up after first 30 min. Confirm with 1.8x volume and no gap fill."
                 else:
-                    execution_rule = "Confirm breakout with 1.8x volume and price above VWAP before entry."
+                    execution_rule = "Confirm breakout above VWAP with volume expansion before entry. Do NOT chase."
             else:
                 if market_regime_legacy != "Bull" and getattr(config, "STRICT_BULL_ONLY_BUY", False):
                     execution_rule = f"Strictly monitor today. Market Trend is {market_regime_legacy.upper()} (Risk Shield active — DO NOT enter trades)."

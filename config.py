@@ -166,17 +166,26 @@ MOM_PROFIT_PARTIAL  = 0.50      # Book 50% at first target
 # Regime is determined by regime_engine.py
 # ─────────────────────────────────────────────
 
-# Ensemble sub-model base weights (sum = 1.0)
-# Momentum | Quality | Institutional | Catalyst
+# Ensemble sub-model base weights — rebalanced 2026-07-09 based on IC audit
+# IC data: institutional +0.34, quality +0.31, catalyst +0.23, momentum/RS -0.07
+# Weights now reflect ACTUAL predictive power, not theoretical assumptions
 ENSEMBLE_WEIGHTS = {
-    "Bull_Trend":        {"momentum": 0.53, "quality": 0.02, "institutional": 0.43, "catalyst": 0.02},
-    "Bull_Expansion":    {"momentum": 0.58, "quality": 0.01, "institutional": 0.40, "catalyst": 0.01},
-    "Bull_Exhaustion":   {"momentum": 0.44, "quality": 0.02, "institutional": 0.52, "catalyst": 0.02},
-    "Neutral_Rotation":  {"momentum": 0.49, "quality": 0.02, "institutional": 0.47, "catalyst": 0.02},
-    "Neutral_Compression": {"momentum": 0.44, "quality": 0.02, "institutional": 0.52, "catalyst": 0.02},
-    "Bear_Trend":        {"momentum": 0.50, "quality": 0.02, "institutional": 0.46, "catalyst": 0.02},
-    "Bear_Panic":        {"momentum": 0.41, "quality": 0.02, "institutional": 0.55, "catalyst": 0.02},
-    "Bear_Recovery":     {"momentum": 0.50, "quality": 0.02, "institutional": 0.46, "catalyst": 0.02},
+    # Bull: Institutional leads, quality matters, momentum de-weighted (RS has -0.07 IC)
+    "Bull_Trend":        {"momentum": 0.14, "quality": 0.28, "institutional": 0.40, "catalyst": 0.18},
+    # Bull Expansion: slightly more institutional (momentum surge), but quality still strong
+    "Bull_Expansion":    {"momentum": 0.16, "quality": 0.26, "institutional": 0.42, "catalyst": 0.16},
+    # Bull Exhaustion: institutions selling, quality + catalyst signal who survives
+    "Bull_Exhaustion":   {"momentum": 0.10, "quality": 0.32, "institutional": 0.38, "catalyst": 0.20},
+    # Neutral: Quality and catalyst differentiate winners from losers
+    "Neutral_Rotation":  {"momentum": 0.12, "quality": 0.30, "institutional": 0.38, "catalyst": 0.20},
+    # Compression: Quiet before breakout — quality + institutional tell who breaks out
+    "Neutral_Compression": {"momentum": 0.10, "quality": 0.32, "institutional": 0.40, "catalyst": 0.18},
+    # Bear: Safety over momentum — quality and fundamentals protect capital
+    "Bear_Trend":        {"momentum": 0.10, "quality": 0.36, "institutional": 0.36, "catalyst": 0.18},
+    # Bear Panic: Pure institutional (who is NOT selling) + quality survival
+    "Bear_Panic":        {"momentum": 0.08, "quality": 0.34, "institutional": 0.42, "catalyst": 0.16},
+    # Recovery: Institutions step in first, then fundamentals confirm recovery
+    "Bear_Recovery":     {"momentum": 0.14, "quality": 0.30, "institutional": 0.38, "catalyst": 0.18},
 }
 
 # Mapping from 8-state regime to legacy 3-state for backward compatibility
@@ -223,6 +232,35 @@ QM_WEIGHTS = {
     "earnings_growth": 0.2,
     "roe": 0.2,
     "fcf_growth": 0.2
+}
+
+# ─────────────────────────────────────────────
+# STRATEGY DEGRADATION & REPLACEMENT
+# If a setup type has been losing for N consecutive days, it gets replaced
+# by a fresh strategy from STRATEGY_FALLBACK map.
+# ─────────────────────────────────────────────
+STRATEGY_DEGRADATION_DAYS = 3       # Days of negative avg return before replacement
+STRATEGY_DEGRADATION_THRESHOLD = -0.15  # Avg return below this % triggers replacement
+
+# Replacement map: failing setup → fresh replacement strategy
+STRATEGY_FALLBACK = {
+    "MOMENTUM":        "INSTITUTIONAL_BREAKOUT",  # IC audit: institutional has +0.34 IC
+    "EARNINGS_RUNNER": "QUALITY_TREND",           # IC audit: quality/fundamental has +0.31 IC
+    "PULLBACK":        "VWAP_RECLAIM",            # Structure-based entry, cleaner signal
+}
+
+# Minimum alpha required per setup type before a BUY is confirmed
+# Based on actual performance — worse-performing setups need higher conviction
+SETUP_MIN_ALPHA = {
+    "VALUE_MOMENTUM":        46.0,  # Best setup (75% WR, +0.25%) — lowest bar
+    "INSTITUTIONAL_BREAKOUT": 48.0, # New strategy replacing MOMENTUM — fresh signal required
+    "VWAP_RECLAIM":           50.0, # Replacing PULLBACK — needs clean VWAP flip
+    "QUALITY_TREND":          50.0, # Replacing EARNINGS_RUNNER — needs fundamental conviction
+    "BREAKOUT":               52.0, # Limited data (1 trade) — needs volume confirmation
+    "PULLBACK":               55.0, # Historical -0.39% — needs high conviction
+    "EARNINGS_RUNNER":        60.0, # Historical -0.24% — must be high confidence only
+    "MOMENTUM":               65.0, # Worst performer (-0.54%) — hardest bar to pass
+    "WATCHLIST_ONLY":         70.0, # Not a buy setup — almost never passes
 }
 
 # ─────────────────────────────────────────────

@@ -106,44 +106,93 @@ def get_risk_profile(score: float, ms_structure: str, volume_surge: bool) -> str
 
 def get_trade_type(ms_structure: str, gap_pct: float, rsi: float, indic: dict = None, fund: dict = None) -> str:
     """
-    Suggest setup type in plain English for the end user and tracking database.
-    Setups: BREAKOUT, PULLBACK, MOMENTUM, VALUE_MOMENTUM, EARNINGS_RUNNER
+    Classify the setup type for this stock pick.
+
+    v2.0 — based on IC audit (2026-07-09):
+    Setup priority order (best → worst performer):
+      1. VALUE_MOMENTUM     — 75% WR, +0.25% avg (ONLY profitable setup)
+      2. INSTITUTIONAL_BREAKOUT — replaces MOMENTUM (IC +0.34 for institutional)
+      3. QUALITY_TREND      — replaces EARNINGS_RUNNER (IC +0.31 for fundamentals)
+      4. VWAP_RECLAIM       — replaces PULLBACK (clean structure entry)
+      5. BREAKOUT           — needs volume confirmation
+      6. EARNINGS_RUNNER    — only on very strong confirmed surprises (>10%)
+      7. WATCHLIST_ONLY     — catch-all (was MOMENTUM — removed as fallback)
+
+    MOMENTUM is no longer a catch-all. A stock either has a clear setup or
+    it's WATCHLIST_ONLY and must score very high to get a BUY.
     """
     indic = indic or {}
-    fund = fund or {}
+    fund  = fund  or {}
     try:
-        dist_ema20 = float(indic.get("dist_from_ema20", 0.0))
-        vol_ratio = float(indic.get("volume_ratio", 1.0))
-        ema_aligned = indic.get("ema_aligned", False)
-        
-        # Check Earnings Runner first
-        earn_surprise = fund.get("earnings_surprise") or 0.0
-        profit_growth = fund.get("profit_growth") or 0.0
-        if (earn_surprise > 5.0 or profit_growth > 0.20) and ema_aligned:
-            return "EARNINGS_RUNNER"
-            
-        # Check Pullback
-        # Close near 20 EMA (within -4% to +0.8%) under low volume
-        if ema_aligned and (-4.0 <= dist_ema20 <= 0.8) and vol_ratio < 1.1:
-            return "PULLBACK"
-            
-        # Check Breakout
-        if ms_structure == "breakout" or (indic.get("volume_surge") and ms_structure == "uptrend"):
-            return "BREAKOUT"
-            
-        # Check Value Momentum
-        pe = fund.get("pe_ratio")
-        roe = fund.get("roe") or 0.0
-        if pe is not None and 0 < pe < 25 and roe > 0.15 and ema_aligned:
+        dist_ema20   = float(indic.get("dist_from_ema20", 0.0))
+        vol_ratio    = float(indic.get("volume_ratio", 1.0))
+        ema_aligned  = bool(indic.get("ema_aligned", False))
+        above_vwap   = bool(indic.get("above_vwap", False))
+        cmf          = float(indic.get("cmf", 0.0))
+        macd_bullish = bool(indic.get("macd_bullish", False))
+        volume_surge = bool(indic.get("volume_surge", False))
+
+        pe           = fund.get("pe_ratio")
+        roe          = float(fund.get("roe") or 0.0)
+        de           = float(fund.get("debt_to_equity") or 99.0)
+        earn_surprise= float(fund.get("earnings_surprise") or 0.0)
+        profit_growth= float(fund.get("profit_growth") or 0.0)
+        revenue_growth = float(fund.get("revenue_growth") or 0.0)
+
+        # ── 1. VALUE_MOMENTUM — Best setup, check first ────────────────
+        # Quality business (PE < 28, ROE > 12%, low debt) + in uptrend
+        # Widened from old: pe < 25 → pe < 28, roe > 0.15 → 0.12
+        if (pe is not None and 0 < pe < 28
+                and roe > 0.12
+                and de < 1.5
+                and ema_aligned
+                and rsi <= 75):
             return "VALUE_MOMENTUM"
-            
-        # Check Momentum
-        if ema_aligned and rsi > 58:
-            return "MOMENTUM"
-            
-        return "MOMENTUM" if ema_aligned else "WATCHLIST_ONLY"
+
+        # ── 2. INSTITUTIONAL_BREAKOUT — New, replaces MOMENTUM ────────
+        # Institutions are accumulating (CMF high) + volume expanding + structure bullish
+        # This is what the IC audit tells us works: institutional signal IC +0.34
+        if (cmf > 0.08
+                and vol_ratio >= 1.5
+                and above_vwap
+                and ema_aligned
+                and 46 <= rsi <= 74):
+            return "INSTITUTIONAL_BREAKOUT"
+
+        # ── 3. QUALITY_TREND — New, replaces EARNINGS_RUNNER ─────────
+        # Quality fundamental growth + price in uptrend
+        # Catches good companies in sustained moves (not one-time earnings spikes)
+        if (roe > 0.10
+                and (revenue_growth > 0.08 or profit_growth > 0.12)
+                and de < 1.8
+                and ema_aligned
+                and rsi < 76):
+            return "QUALITY_TREND"
+
+        # ── 4. VWAP_RECLAIM — New, replaces PULLBACK ──────────────────
+        # Price crossed back above VWAP with volume (clean re-entry signal)
+        if (above_vwap
+                and vol_ratio >= 1.2
+                and rsi >= 48
+                and ema_aligned
+                and dist_ema20 <= 3.0):
+            return "VWAP_RECLAIM"
+
+        # ── 5. BREAKOUT — Structure breakout with volume ───────────────
+        if ms_structure == "breakout" or (volume_surge and ms_structure == "uptrend" and above_vwap):
+            return "BREAKOUT"
+
+        # ── 6. EARNINGS_RUNNER — Only on very strong confirmed surprise ─
+        # Raised from >5% to >10% surprise to reduce noise (was generating 54 trades!)
+        if (earn_surprise > 10.0 or profit_growth > 0.35) and ema_aligned and volume_surge:
+            return "EARNINGS_RUNNER"
+
+        # ── 7. WATCHLIST_ONLY — No clean setup found ──────────────────
+        # Removed MOMENTUM as catch-all. If nothing fits, it's not a BUY candidate.
+        return "WATCHLIST_ONLY"
+
     except Exception:
-        return "MOMENTUM"
+        return "WATCHLIST_ONLY"
 
 
 def check_daily_loss_limit(trade_history: list) -> Dict:
