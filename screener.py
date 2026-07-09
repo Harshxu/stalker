@@ -548,44 +548,37 @@ def get_active_open_positions_heat() -> float:
     return active_count * risk_per_trade_pct
 
 
-def get_recent_pick_counts(lookback_days: int = 5) -> dict:
+def get_yesterday_picks() -> set:
     """
-    Returns a dict of {symbol: days_appeared} for picks in the last N days.
-    Used to penalise stocks that keep appearing in picks without fresh momentum.
-    Staleness = same stock in top picks for 3+ consecutive days signals the
-    screener is anchoring on large-cap liquidity (BIOCON, BHARTIARTL, LT etc.)
-    rather than fresh intraday momentum signals.
+    Returns a set of symbols that appeared in yesterday's picks.
+    Used to hard-block stocks that show no fresh movement today.
+    A stock should only repeat if it's genuinely moving — not just
+    because it always passes liquidity/DQ checks (BIOCON, BHARTIARTL etc.)
     """
     from datetime import date, timedelta
-    counts = {}
+    yesterday = str(date.today() - timedelta(days=1))
     db = db_manager.get_db()
     records = []
     try:
         if db is not None:
             col = db[config.MONGO_COLLECTION_PICKS]
-            min_date = str(date.today() - timedelta(days=lookback_days))
-            records = list(col.find({"date": {"$gte": min_date}}, sort=[("date", 1)]))
+            records = list(col.find({"date": yesterday}))
     except Exception:
         pass
     if not records:
         try:
             all_records = db_manager._read_json("daily_picks.json")
-            min_date = str(date.today() - timedelta(days=lookback_days))
-            records = [r for r in all_records if r.get("date", "") >= min_date]
-            records.sort(key=lambda r: r.get("date", ""))
+            records = [r for r in all_records if r.get("date", "") == yesterday]
         except Exception:
             pass
-    today_str = str(date.today())
+    symbols = set()
     for rec in records:
-        rec_date = rec.get("date", "")
-        if rec_date == today_str:
-            continue  # Don't count today's own run against itself
         picks_list = rec.get("picks", rec.get("top_picks", []))
         for p in picks_list:
             sym = p.get("symbol", "")
             if sym:
-                counts[sym] = counts.get(sym, 0) + 1
-    return counts
+                symbols.add(sym)
+    return symbols
 
 
 def compute_percentiles(raw_map: Dict[str, float]) -> Dict[str, float]:
@@ -1061,6 +1054,17 @@ def run_screen(symbols: Optional[List[str]] = None,
         else: # Bull
             risk_threshold = 7.5
 
+        # Load yesterday's picks for the fresh-signal gate
+        # A stock that appeared yesterday can only re-enter if it's genuinely
+        # moving today (change_pct >= +0.5%). This hard-blocks stale large-caps
+        # like BIOCON, BHARTIARTL, LT, JSWSTEEL, FEDERALBNK that pass every
+        # filter but offer no new intraday opportunity.
+        yesterday_picks = get_yesterday_picks()
+        if yesterday_picks:
+            logger.info(f"[FRESHNESS] Yesterday's picks ({len(yesterday_picks)} symbols) — will block if no fresh move today: {sorted(yesterday_picks)}")
+
+        FRESH_SIGNAL_MIN_CHANGE = 0.5  # Stock must be up >= 0.5% today to repeat
+
         survivors = []
         stage1_results = []
         
@@ -1086,6 +1090,15 @@ def run_screen(symbols: Optional[List[str]] = None,
                 continue
             if tech_cache.get("structure", {}).get("structure") == "downtrend":
                 continue
+
+            # Fresh-signal gate: hard-block stocks from yesterday with no new move
+            if sym in yesterday_picks:
+                today_change = float(indicators_by_symbol[sym].get("change_pct", 0.0))
+                if today_change < FRESH_SIGNAL_MIN_CHANGE:
+                    logger.debug(f"[FRESHNESS] {sym} blocked — in yesterday's picks, only {today_change:+.2f}% today (need >= +{FRESH_SIGNAL_MIN_CHANGE}%)")
+                    continue
+                else:
+                    logger.info(f"[FRESHNESS] {sym} ALLOWED repeat — genuine move: {today_change:+.2f}% today")
                 
             survivors.append(sym)
             
@@ -1201,12 +1214,6 @@ def run_screen(symbols: Optional[List[str]] = None,
         pulse_score = market_pulse_data["pulse_score"]
         downgrade_buy = market_pulse_data["downgrade_buy"]
 
-        # Load recent pick history to apply recency penalty (anti-staleness filter)
-        recent_pick_counts = get_recent_pick_counts(lookback_days=5)
-        if recent_pick_counts:
-            stale_symbols = [s for s, c in recent_pick_counts.items() if c >= 3]
-            if stale_symbols:
-                logger.info(f"[RECENCY] Stale stocks (3+ days in picks): {stale_symbols}")
 
         for sym in survivors:
             indic = indicators_by_symbol[sym]
@@ -1359,17 +1366,6 @@ def run_screen(symbols: Optional[List[str]] = None,
                 adjusted_alpha = final_score + penalty + intraday_momentum_boost
                 adjusted_alpha = min(100.0, adjusted_alpha)
 
-                # ── RECENCY PENALTY ────────────────────────────────────────
-                # Penalise stocks that have appeared in top picks for 3+ consecutive
-                # days without significant price action. Large-cap stalwarts like
-                # BIOCON, BHARTIARTL, LT, JSWSTEEL, FEDERALBNK always pass
-                # liquidity + data-quality checks but offer no fresh signal.
-                # Penalty: -5 pts per day beyond 2 consecutive appearances, max -20
-                repeat_days = recent_pick_counts.get(sym, 0)
-                if repeat_days >= 3:
-                    repeat_penalty = min(20.0, (repeat_days - 2) * 5.0)
-                    adjusted_alpha = max(0.0, adjusted_alpha - repeat_penalty)
-                    logger.debug(f"[RECENCY] {sym} appeared {repeat_days}d in a row — penalty −{repeat_penalty:.0f} pts → alpha {adjusted_alpha:.1f}")
 
                 # Leadership Boost
                 leadership_boost = 0.0
