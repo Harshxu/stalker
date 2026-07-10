@@ -629,32 +629,48 @@ def fetch_fundamentals(symbol: str) -> Dict:
         fundamentals["has_recent_earnings"] = False
         fundamentals["earnings_surprise"] = None
 
-        # Fetch quarterly financials and cash flow
+        # Fetch quarterly financials and cash flow with a hard timeout
+        # (ticker.quarterly_financials and quarterly_cash_flow can hang indefinitely
+        # on slow/rate-limited Yahoo Finance responses — this was causing Stage 1 watchdog)
+        def _fetch_quarterly(tick):
+            try:
+                result = {}
+                qf = tick.quarterly_financials
+                if qf is not None and not qf.empty:
+                    rev_row    = qf.loc['Total Revenue']  if 'Total Revenue'  in qf.index else None
+                    net_row    = qf.loc['Net Income']     if 'Net Income'     in qf.index else None
+                    eps_row    = (qf.loc['Diluted EPS']   if 'Diluted EPS'   in qf.index else
+                                  qf.loc['Basic EPS']    if 'Basic EPS'     in qf.index else None)
+                    if rev_row is not None:
+                        result["quarterly_revs"] = [float(v) for v in rev_row.values[:4][::-1] if not pd.isna(v)]
+                    if net_row is not None:
+                        result["quarterly_profits"] = [float(v) for v in net_row.values[:4][::-1] if not pd.isna(v)]
+                    if eps_row is not None:
+                        result["quarterly_eps"] = [float(v) for v in eps_row.values[:4][::-1] if not pd.isna(v)]
+                    if rev_row is not None and net_row is not None:
+                        margins = net_row / rev_row.replace(0, 1e-10)
+                        result["quarterly_margins"] = [float(v) for v in margins.values[:4][::-1] if not pd.isna(v)]
+                qcf = tick.quarterly_cash_flow
+                if qcf is not None and not qcf.empty:
+                    fcf_row = qcf.loc['Free Cash Flow'] if 'Free Cash Flow' in qcf.index else None
+                    if fcf_row is not None:
+                        result["quarterly_fcf"] = [float(v) for v in fcf_row.values[:4][::-1] if not pd.isna(v)]
+                return result
+            except Exception:
+                return {}
+
         try:
-            import pandas as pd
-            q_fin = ticker.quarterly_financials
-            if q_fin is not None and not q_fin.empty:
-                rev_row = q_fin.loc['Total Revenue'] if 'Total Revenue' in q_fin.index else None
-                net_inc_row = q_fin.loc['Net Income'] if 'Net Income' in q_fin.index else None
-                eps_row = q_fin.loc['Diluted EPS'] if 'Diluted EPS' in q_fin.index else (q_fin.loc['Basic EPS'] if 'Basic EPS' in q_fin.index else None)
-                
-                if rev_row is not None:
-                    fundamentals["quarterly_revs"] = [float(v) for v in rev_row.values[:4][::-1] if not pd.isna(v)]
-                if net_inc_row is not None:
-                    fundamentals["quarterly_profits"] = [float(v) for v in net_inc_row.values[:4][::-1] if not pd.isna(v)]
-                if eps_row is not None:
-                    fundamentals["quarterly_eps"] = [float(v) for v in eps_row.values[:4][::-1] if not pd.isna(v)]
-                if rev_row is not None and net_inc_row is not None:
-                    margins = net_inc_row / rev_row.replace(0, 1e-10)
-                    fundamentals["quarterly_margins"] = [float(v) for v in margins.values[:4][::-1] if not pd.isna(v)]
-                    
-            q_cf = ticker.quarterly_cash_flow
-            if q_cf is not None and not q_cf.empty:
-                fcf_row = q_cf.loc['Free Cash Flow'] if 'Free Cash Flow' in q_cf.index else None
-                if fcf_row is not None:
-                    fundamentals["quarterly_fcf"] = [float(v) for v in fcf_row.values[:4][::-1] if not pd.isna(v)]
+            from concurrent.futures import ThreadPoolExecutor as _TPE, TimeoutError as _TE
+            with _TPE(max_workers=1) as _ex:
+                _fut = _ex.submit(_fetch_quarterly, ticker)
+                try:
+                    quarterly_data = _fut.result(timeout=8)  # 8-second hard cap per symbol
+                    fundamentals.update(quarterly_data)
+                except (_TE, Exception):
+                    logger.debug(f"Quarterly data timeout/error for {symbol} — using info-level data only")
         except Exception as q_err:
-            logger.debug(f"Quarterly financials/cashflow fetch failed for {symbol}: {q_err}")
+            logger.debug(f"Quarterly financials fetch failed for {symbol}: {q_err}")
+
 
         # Save to cache
         if _fundamentals_cache is None:

@@ -613,8 +613,9 @@ def run_screen(symbols: Optional[List[str]] = None,
     safe_mode_active = False
     safe_mode_reason = ""
 
-    # Watchdog timeout per stage (5 minutes in seconds)
-    stage_timeout = 300
+    # Watchdog timeout per stage — raised to 10 minutes for Stage 1 (fundamentals across 200 symbols)
+    # Stage 1 legitimately takes 3-8 minutes when Yahoo Finance is slow or partially rate-limiting.
+    stage_timeout = 600
 
     try:
         # Check MongoDB connection (if not dry_run)
@@ -648,7 +649,7 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         logger.info(f"Fetching fundamentals for {len(symbols)} symbols using parallel workers...")
         
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=25) as executor:
             futures = {executor.submit(fetch_single, sym): sym for sym in symbols}
             for future in as_completed(futures):
                 # Check Watchdog timeout
