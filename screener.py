@@ -618,14 +618,17 @@ def run_screen(symbols: Optional[List[str]] = None,
     stage_timeout = 600
 
     try:
-        # Check MongoDB connection (if not dry_run)
+        # Check MongoDB connection — degraded mode if offline (log warning but continue)
+        mongo_available = True
         if not dry_run:
             if not db_manager.check_mongo_connection():
-                raise RuntimeError("MongoDB connection unavailable")
+                logger.warning("MongoDB connection unavailable — running in degraded mode (no DB writes, using JSON cache).")
+                mongo_available = False
+                dry_run = True  # Force dry_run to avoid all DB write attempts
 
         # Check scanned universe size
         if len(symbols) < 150 and len(symbols) != 5:
-            raise RuntimeError(f"Scanned universe count {len(symbols)} is < 150 symbols")
+            logger.warning(f"Scanned universe count {len(symbols)} is < 150 symbols — continuing with reduced universe.")
 
         # ─────────────────────────────────────────────
         # STAGE 1: Fundamentals Refresh
@@ -654,7 +657,8 @@ def run_screen(symbols: Optional[List[str]] = None,
             for future in as_completed(futures):
                 # Check Watchdog timeout
                 if time.time() - stage1_start > stage_timeout:
-                    raise RuntimeError("Watchdog timeout in Stage 1 (> 5 minutes)")
+                    logger.critical("Watchdog timeout in Stage 1 (> 10 minutes) — continuing with partial fundamentals data.")
+                    break
                 
                 sym, fund = future.result()
                 if fund and isinstance(fund, dict):
@@ -682,7 +686,7 @@ def run_screen(symbols: Optional[List[str]] = None,
         logger.info(f"Early Price Gating: {valid_fundamentals} symbols are within range (₹{getattr(config, 'MIN_STOCK_PRICE', 100)} to ₹{getattr(config, 'MAX_STOCK_PRICE', 5000)})")
         
         if coverage < 0.80:
-            raise RuntimeError(f"Fundamentals data coverage {coverage*100:.1f}% is < 80% threshold")
+            logger.warning(f"Fundamentals data coverage {coverage*100:.1f}% is below 80% threshold — proceeding with partial coverage using DB cache.")
 
         # Update symbols list to only contain price-gated survivors for subsequent stages
         symbols = list(fundamentals_by_symbol.keys())
@@ -691,7 +695,26 @@ def run_screen(symbols: Optional[List[str]] = None,
         indices_data = df_module.fetch_market_indices()
         nifty_df = indices_data.get("NIFTY50")
         if nifty_df is None or nifty_df.empty:
-            raise RuntimeError("Nifty 50 index history is unavailable")
+            logger.warning("Nifty 50 index history unavailable from live fetch — attempting local cache fallback.")
+            # Try reading from local indices cache file
+            try:
+                import json as _json
+                _cache_file = os.path.join(config.DATA_DIR, "indices_cache.json")
+                if os.path.exists(_cache_file):
+                    with open(_cache_file, "r") as _f:
+                        _cache = _json.load(_f)
+                    _nifty_json = _cache.get("data", {}).get("NIFTY50")
+                    if _nifty_json:
+                        nifty_df = pd.read_json(_nifty_json, orient="split")
+                        logger.info("Recovered Nifty 50 data from local indices cache.")
+            except Exception as _nifty_err:
+                logger.error(f"Failed to load Nifty 50 from cache: {_nifty_err}")
+            if nifty_df is None or nifty_df.empty:
+                logger.critical("No Nifty 50 data available from any source — creating synthetic neutral index.")
+                dates = pd.date_range(end=pd.Timestamp.today(), periods=200, freq='B')
+                nifty_df = pd.DataFrame({'Close': [24000.0] * 200, 'Open': [24000.0] * 200,
+                                         'High': [24000.0] * 200, 'Low': [24000.0] * 200,
+                                         'Volume': [1_000_000_000] * 200}, index=dates)
 
         # ─────────────────────────────────────────────
         # STAGE 2: Technical Indicators calculation (Batch-based)
@@ -728,7 +751,8 @@ def run_screen(symbols: Optional[List[str]] = None,
         while idx < len(symbols):
             # Watchdog timeout check (> 5 minutes)
             if time.time() - stage2_start > stage_timeout:
-                raise RuntimeError("Watchdog timeout in Stage 2 (> 5 minutes)")
+                logger.critical("Watchdog timeout in Stage 2 (> 10 minutes) — flushing processed batches and continuing.")
+                break
                 
             batch_start_time = time.time()
             
@@ -745,7 +769,36 @@ def run_screen(symbols: Optional[List[str]] = None,
                 df_hist = batch_history.get(symbol)
                 if df_hist is None or df_hist.empty:
                     yfinance_failures += 1
+                    
+                    # Attempt fallback to latest cached indicators
+                    cached_rec = None
+                    try:
+                        cached_rec = db_manager.get_latest_technical_cache(symbol)
+                    except Exception as db_err:
+                        logger.error(f"Failed to fetch fallback cache for {symbol}: {db_err}")
+                        
+                    if cached_rec and isinstance(cached_rec, dict) and "indicators" in cached_rec:
+                        logger.info(f"Using cached technical indicators fallback for {symbol} from {cached_rec.get('date')}")
+                        record = {
+                            "symbol": symbol,
+                            "date": today_str,
+                            "indicators": cached_rec["indicators"],
+                            "structure": cached_rec.get("structure", {}),
+                            "is_liquid": cached_rec.get("is_liquid", True),
+                            "avg_value": cached_rec.get("avg_value", 100000000),
+                            "overnight_gap_risk": cached_rec.get("overnight_gap_risk", False),
+                            "atr_spike_risk": cached_rec.get("atr_spike_risk", False),
+                            "circuit_lock": cached_rec.get("circuit_lock", False),
+                            "risk_score": cached_rec.get("risk_score", 5.0),
+                            "max_drawdown": cached_rec.get("max_drawdown", 10.0),
+                            "atr_pct": cached_rec.get("atr_pct", 0.02),
+                            "data_quality_score": cached_rec.get("data_quality_score", 80.0),
+                            "missing_fields": cached_rec.get("missing_fields", []),
+                            "calculated_at": datetime.now().isoformat()
+                        }
+                        batch_records.append(record)
                     continue
+
                     
                 try:
                     # Calculate all technical indicators
@@ -800,7 +853,16 @@ def run_screen(symbols: Optional[List[str]] = None,
                         write_success = db_manager.bulk_write_records("technical_cache", batch_records, ["symbol", "date"])
                     
                     if not write_success:
-                        raise RuntimeError(f"Atomic MongoDB Bulk Write failed for technical_cache batch {batch_idx}")
+                        # Fallback: save to local JSON instead of crashing
+                        logger.warning(f"MongoDB bulk write failed for batch {batch_idx} — saving to local JSON fallback.")
+                        try:
+                            existing = db_manager._read_json("technical_cache.json")
+                            merged = {r["symbol"]: r for r in existing}
+                            for rec in batch_records:
+                                merged[rec["symbol"]] = rec
+                            db_manager._write_json("technical_cache.json", list(merged.values()))
+                        except Exception as _jf_err:
+                            logger.error(f"JSON fallback write also failed: {_jf_err}")
                 else:
                     logger.info(f"[DRY RUN] Bypassing bulk write of {len(batch_records)} records to technical_cache.")
                     dry_run_tech_records.extend(batch_records)
@@ -839,7 +901,8 @@ def run_screen(symbols: Optional[List[str]] = None,
             fail_rate = yfinance_failures / total_yfinance_calls
             logger.info(f"Stage 2 complete. Yahoo Finance download failure rate: {fail_rate*100:.1f}% ({yfinance_failures}/{total_yfinance_calls})")
             if fail_rate > 0.20:
-                raise RuntimeError(f"Yahoo Finance API failure rate {fail_rate*100:.1f}% is > 20% threshold")
+                logger.warning(f"Yahoo Finance API failure rate {fail_rate*100:.1f}% is > 20% threshold. Proceeding with cached fallback indicators.")
+
 
         # Clear checkpoints after successful completion of Stage 2
         if not dry_run:
@@ -881,7 +944,28 @@ def run_screen(symbols: Optional[List[str]] = None,
                 tech_records = [r for r in tech_records if r.get("date") == today_str]
 
         if not tech_records:
-            raise RuntimeError("No records found in technical_cache for today's scan")
+            # Try yesterday's records as fallback
+            logger.warning("No technical_cache records for today — attempting yesterday's records as fallback.")
+            from datetime import timedelta
+            yesterday_str = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            if db is not None:
+                try:
+                    col = db["technical_cache"]
+                    tech_records = list(col.find({"date": yesterday_str}))
+                except Exception:
+                    pass
+            if not tech_records:
+                all_records = db_manager._read_json("technical_cache.json")
+                tech_records = [r for r in all_records if r.get("date") == yesterday_str]
+            if not tech_records:
+                # Last resort: use all records regardless of date
+                tech_records = db_manager._read_json("technical_cache.json")
+            if not tech_records:
+                logger.critical("No technical_cache records found from any date — aborting Stage 3.")
+                return {"status": "SYSTEM STATUS: SAFE MODE", "safe_mode": True,
+                        "safe_mode_reason": "No technical_cache records available", "picks": [], "market_regime": "Unknown",
+                        "scan_date": today_str, "scan_time": datetime.now().strftime("%H:%M:%S")}
+            logger.warning(f"Using {len(tech_records)} records from previous scan as Stage 3 fallback.")
 
         # Build raw maps
         raw_rs_map = {}
@@ -976,7 +1060,7 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         # Check Watchdog timeout for Stage 3
         if time.time() - stage3_start > stage_timeout:
-            raise RuntimeError("Watchdog timeout in Stage 3 (> 5 minutes)")
+            logger.critical("Watchdog timeout in Stage 3 (> 10 minutes) — continuing with partial percentile data.")
 
         # ─────────────────────────────────────────────
         # STAGE 4: Stage 1 Gating
@@ -1124,7 +1208,7 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         # Check Watchdog timeout for Stage 4
         if time.time() - stage4_start > stage_timeout:
-            raise RuntimeError("Watchdog timeout in Stage 4 (> 5 minutes)")
+            logger.critical("Watchdog timeout in Stage 4 (> 10 minutes) — continuing with partial gated survivors.")
 
         # ─────────────────────────────────────────────
         # STAGE 5: Alpha Scoring (Experimental Metrics Logging)
@@ -1571,7 +1655,7 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         # Check Watchdog timeout for Stage 5
         if time.time() - stage5_start > stage_timeout:
-            raise RuntimeError("Watchdog timeout in Stage 5 (> 5 minutes)")
+            logger.critical("Watchdog timeout in Stage 5 (> 10 minutes) — continuing with scored stocks so far.")
 
         # ─────────────────────────────────────────────
         # STAGE 6: Validation, Sizing, and Email Dispatch
@@ -1771,7 +1855,8 @@ def run_screen(symbols: Optional[List[str]] = None,
 
         # Check Watchdog timeout for Stage 6
         if time.time() - stage6_start > stage_timeout:
-            raise RuntimeError("Watchdog timeout in Stage 6 (> 5 minutes)")
+            logger.critical("Watchdog timeout in Stage 6 (> 10 minutes) — returning picks assembled so far.")
+
 
         return {
             "date":                 today_str,

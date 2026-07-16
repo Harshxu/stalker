@@ -207,9 +207,13 @@ def run_premarket_analysis():
             # Save to DB immediately so dashboard can read it
             db_manager.save_daily_picks(result)
 
-            # Automatically clean up MongoDB data older than 10 days to save space
+            # Smart DB storage cleanup + storage report (MongoDB-primary)
             try:
-                db_manager.cleanup_old_data(days_to_keep=10)
+                cleanup_results = db_manager.storage_cleanup(keep_technical_days=5, keep_picks_days=90)
+                stats = db_manager.get_db_stats()
+                if stats.get("available"):
+                    logger.info(f"[DB STATS] Total: {stats['total_size_mb']:.1f} MB | "
+                                + " | ".join([f"{c}: {v['count']} docs ({v['size_kb']} KB)" for c, v in stats.get('collections', {}).items()]))
             except Exception as clean_err:
                 logger.error(f"Failed to auto-cleanup MongoDB space: {clean_err}")
 
@@ -1842,6 +1846,12 @@ if __name__ == "__main__":
 
     if args.mode in ["run", "scan", "test"] and not IS_DRY_RUN:
         acquire_execution_lock()
+
+    # Setup MongoDB TTL indexes on startup (idempotent — safe to call every boot)
+    try:
+        db_manager.setup_ttl_indexes()
+    except Exception as ttl_err:
+        logger.warning(f"TTL index setup skipped (non-fatal): {ttl_err}")
 
     if args.mode == "test":
         print("🧪 Running test scan (5 stocks)...")

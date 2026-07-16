@@ -53,10 +53,26 @@ def mark_rate_limited():
     if _rate_limit_cooldown_until <= time.time():
         _rate_limit_cooldown_until = time.time() + COOLDOWN_DURATION_SEC
         logger.warning(f"Yahoo Finance rate limit hit! Pausing all yfinance network calls for {COOLDOWN_DURATION_SEC // 60} minutes.")
+        # Persist to MongoDB so cooldown survives Render restarts
+        try:
+            import db_manager as _dbm
+            _dbm.save_rate_limit_state(_rate_limit_cooldown_until)
+        except Exception:
+            pass
 
 def is_rate_limited() -> bool:
     """Check if we are currently in rate-limiting cooldown."""
     global _rate_limit_cooldown_until
+    # On first call (value is 0), try loading persisted state from MongoDB
+    if _rate_limit_cooldown_until == 0.0:
+        try:
+            import db_manager as _dbm
+            persisted = _dbm.load_rate_limit_state()
+            if persisted > time.time():
+                _rate_limit_cooldown_until = persisted
+                logger.info(f"Loaded active rate-limit cooldown from DB — {(persisted - time.time())/60:.1f} min remaining.")
+        except Exception:
+            pass
     if _rate_limit_cooldown_until > 0:
         remaining = _rate_limit_cooldown_until - time.time()
         if remaining > 0:
@@ -317,9 +333,34 @@ def fetch_multiple_stocks(symbols: List[str], period: str = "3mo") -> Dict[str, 
             logger.warning("Aborting bulk fetch batch loop due to rate limit hit in previous batch.")
             break
         try:
-            logger.info(f"  Downloading batch {chunk_idx + 1}/{len(chunks)} ({len(chunk)} symbols)...")
-            with _silence_stderr_stdout():
-                data = yf.download(chunk, period=period, interval="1d", auto_adjust=True, group_by="ticker", threads=True, progress=False, session=get_browser_session())
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+            
+            def _run_download():
+                with _silence_stderr_stdout():
+                    return yf.download(
+                        chunk, 
+                        period=period, 
+                        interval="1d", 
+                        auto_adjust=True, 
+                        group_by="ticker", 
+                        threads=True, 
+                        progress=False, 
+                        session=get_browser_session()
+                    )
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_run_download)
+                try:
+                    data = future.result(timeout=25)  # 25-second hard cap per batch download
+                except TimeoutError:
+                    logger.warning(f"Batch {chunk_idx + 1} download timed out after 25 seconds.")
+                    mark_rate_limited()
+                    break
+                except Exception as dl_err:
+                    logger.error(f"Batch {chunk_idx + 1} download failed: {dl_err}")
+                    mark_rate_limited()
+                    break
+
 
             chunk_total = len(chunk)
             for symbol in chunk:
@@ -411,48 +452,72 @@ def fetch_market_indices() -> Dict[str, Optional[pd.DataFrame]]:
     # Cache file path
     cache_file = os.path.join(config.DATA_DIR, "indices_cache.json")
 
-    # If we successfully fetched at least some indices, cache them and fill in gaps
+    # If we successfully fetched at least some indices, cache them and fill gaps
     if fetched_any:
-        # Load existing cache to fill in any indices that failed this time
-        if os.path.exists(cache_file):
+        # Try to fill missing indices from MongoDB cache first, then file
+        try:
+            import db_manager as _dbm
+            db_cached = _dbm.load_indices_cache()
+            for name, df in db_cached.items():
+                if result.get(name) is None and df is not None and not df.empty:
+                    result[name] = df
+                    logger.info(f"Loaded index {name} from MongoDB cache fallback")
+        except Exception as db_fill_err:
+            logger.debug(f"DB indices fill failed, trying file: {db_fill_err}")
+            # File fallback
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r") as f:
+                        cache_data = json.load(f)
+                    for name, df_json in cache_data.get("data", {}).items():
+                        if result.get(name) is None and df_json:
+                            result[name] = pd.read_json(df_json, orient="split")
+                            logger.info(f"Loaded index {name} from file cache fallback")
+                except Exception as cache_err:
+                    logger.error(f"Failed to load cached indices for fallback: {cache_err}")
+
+        # Save successfully fetched results — MongoDB primary, file secondary
+        try:
+            import db_manager as _dbm
+            _dbm.save_indices_cache({n: df for n, df in result.items() if df is not None and not df.empty})
+        except Exception as db_save_err:
+            logger.debug(f"DB indices save failed, falling back to file: {db_save_err}")
+            cache_to_save = {}
+            for name, df in result.items():
+                if df is not None and not df.empty:
+                    cache_to_save[name] = df.to_json(orient="split")
+            try:
+                with open(cache_file, "w") as f:
+                    json.dump({"date": str(date.today()), "data": cache_to_save}, f, indent=2)
+            except Exception as save_err:
+                logger.error(f"Failed to save indices cache to file: {save_err}")
+    else:
+        # All live fetches failed — load from MongoDB cache first, then file
+        logger.warning("All market index fetches failed. Attempting DB + file cache fallback...")
+        try:
+            import db_manager as _dbm
+            db_cached = _dbm.load_indices_cache()
+            if db_cached:
+                result.update(db_cached)
+                logger.info(f"Recovered {len(db_cached)} indices from MongoDB cache fallback.")
+        except Exception as db_load_err:
+            logger.debug(f"DB indices load failed: {db_load_err}")
+
+        # Still missing indices? Try the file
+        missing = [k for k, v in result.items() if v is None]
+        if missing and os.path.exists(cache_file):
             try:
                 with open(cache_file, "r") as f:
                     cache_data = json.load(f)
                 for name, df_json in cache_data.get("data", {}).items():
                     if result.get(name) is None and df_json:
                         result[name] = pd.read_json(df_json, orient="split")
-                        logger.info(f"Loaded index {name} from cache fallback")
+                logger.info("Supplemented missing indices from local file cache fallback.")
             except Exception as cache_err:
-                logger.error(f"Failed to load cached indices for fallback: {cache_err}")
-
-        # Save successfully fetched results to cache
-        cache_to_save = {}
-        for name, df in result.items():
-            if df is not None and not df.empty:
-                cache_to_save[name] = df.to_json(orient="split")
-        
-        try:
-            with open(cache_file, "w") as f:
-                json.dump({"date": str(date.today()), "data": cache_to_save}, f, indent=2)
-        except Exception as save_err:
-            logger.error(f"Failed to save indices cache: {save_err}")
-    else:
-        # All fetches failed! Load completely from cache
-        logger.warning("All market index fetches failed. Attempting full cache fallback...")
-        if os.path.exists(cache_file):
-            try:
-                with open(cache_file, "r") as f:
-                    cache_data = json.load(f)
-                for name, df_json in cache_data.get("data", {}).items():
-                    if df_json:
-                        result[name] = pd.read_json(df_json, orient="split")
-                logger.info("Successfully recovered all indices from local cache fallback.")
-            except Exception as cache_err:
-                logger.critical(f"Failed to load indices from cache fallback: {cache_err}")
-        else:
-            logger.critical("No local indices cache file found to recover indices!")
+                logger.critical(f"Failed to load indices from file cache fallback: {cache_err}")
         
     return result
+
 
 
 # ─────────────────────────────────────────────
@@ -766,9 +831,24 @@ def fetch_open_prices(symbols: List[str], allow_historical: bool = False) -> Dic
     
     try:
         session = get_browser_session()
-        # Fetch 1d data for all symbols
-        with _silence_stderr_stdout():
-            df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        def _run_download():
+            with _silence_stderr_stdout():
+                return yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_download)
+            try:
+                df = future.result(timeout=45)  # 45-second hard cap for all symbols
+            except TimeoutError:
+                logger.warning("Bulk download for open prices timed out after 45 seconds.")
+                mark_rate_limited()
+                return {}
+            except Exception as dl_err:
+                logger.error(f"Bulk download for open prices failed: {dl_err}")
+                mark_rate_limited()
+                return {}
+
         
         if df.empty:
             logger.warning("Bulk download returned empty DataFrame.")
@@ -862,8 +942,24 @@ def fetch_close_prices(symbols: List[str], allow_historical: bool = False) -> Di
     
     try:
         session = get_browser_session()
-        with _silence_stderr_stdout():
-            df = yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        def _run_download():
+            with _silence_stderr_stdout():
+                return yf.download(symbols, period="1d", group_by="ticker", threads=True, progress=False, session=session)
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_download)
+            try:
+                df = future.result(timeout=45)  # 45-second hard cap for all symbols
+            except TimeoutError:
+                logger.warning("Bulk download for close prices timed out after 45 seconds.")
+                mark_rate_limited()
+                return {}
+            except Exception as dl_err:
+                logger.error(f"Bulk download for close prices failed: {dl_err}")
+                mark_rate_limited()
+                return {}
+
         
         if df.empty:
             logger.warning("Bulk download returned empty DataFrame.")

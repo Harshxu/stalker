@@ -1029,4 +1029,261 @@ def get_cached_fundamental(symbol: str) -> Optional[Dict]:
     return None
 
 
+def get_latest_technical_cache(symbol: str) -> Optional[Dict]:
+    """Retrieve the latest cached technical indicators for a given symbol (MongoDB or JSON fallback)."""
+    db = get_db()
+    if db is not None:
+        try:
+            col = db["technical_cache"]
+            record = col.find_one({"symbol": symbol}, sort=[("date", -1)], projection={"_id": 0})
+            if record:
+                return record
+        except Exception as e:
+            logger.error(f"Failed to retrieve latest technical cache from MongoDB for {symbol}: {e}")
+    
+    # Fallback to local JSON cache
+    try:
+        records = _read_json("technical_cache.json")
+        if records:
+            # Filter records for this symbol and sort by date descending
+            sym_records = [r for r in records if r.get("symbol") == symbol]
+            if sym_records:
+                sym_records.sort(key=lambda x: x.get("date", ""), reverse=True)
+                return sym_records[0]
+    except Exception as e:
+        logger.error(f"Failed to retrieve latest technical cache from JSON for {symbol}: {e}")
+    return None
 
+
+# ═══════════════════════════════════════════════
+# DB STATE MANAGEMENT — Load-aware, Render-safe
+# ═══════════════════════════════════════════════
+
+def setup_ttl_indexes():
+    """
+    Create TTL (time-to-live) indexes on all time-sensitive MongoDB collections.
+    Runs once at startup. Old records auto-expire without manual cleanup:
+      - technical_cache:    7 days  (OHLCV indicators recalculated daily)
+      - fundamentals_cache: 7 days  (yfinance fundamentals refreshed weekly)
+      - scan_checkpoints:   2 days  (recovery checkpoints stale after 1 day)
+      - rate_limit_state:   1 hour  (in-flight rate limit flags)
+      - indices_cache:      3 days  (market indices history cached)
+    """
+    db = get_db()
+    if db is None:
+        return
+    try:
+        from pymongo import ASCENDING, DESCENDING
+        
+        def _ensure_ttl(col_name, field, expire_secs):
+            col = db[col_name]
+            existing = col.index_information()
+            idx_name = f"{field}_ttl"
+            if not any(v.get("expireAfterSeconds") is not None for v in existing.values()):
+                col.create_index([(field, ASCENDING)], expireAfterSeconds=expire_secs, name=idx_name, background=True)
+                logger.info(f"[DB] TTL index created on {col_name}.{field} — expires in {expire_secs//86400}d")
+        
+        # technical_cache: expires after 7 days based on 'calculated_at' field
+        _ensure_ttl("technical_cache",    "calculated_at",  7 * 86400)
+        # fundamentals_cache: expires after 7 days based on '_cached_at' field
+        _ensure_ttl("fundamentals_cache", "_cached_at",     7 * 86400)
+        # scan_checkpoints: expires after 2 days
+        _ensure_ttl("scan_checkpoints",   "created_at",     2 * 86400)
+        # rate_limit_state: expires after 1 hour
+        _ensure_ttl("rate_limit_state",   "expires_at",     3600)
+        # indices_cache: expires after 3 days
+        _ensure_ttl("indices_cache",      "cached_at",      3 * 86400)
+
+        # Compound indexes for fast lookups
+        db["technical_cache"].create_index([("symbol", ASCENDING), ("date", DESCENDING)], background=True)
+        db["fundamentals_cache"].create_index([("symbol", ASCENDING)], background=True, unique=True)
+        logger.info("[DB] All TTL + compound indexes verified.")
+    except Exception as e:
+        logger.error(f"Failed to setup TTL indexes: {e}")
+
+
+def save_rate_limit_state(cooldown_until: float) -> bool:
+    """
+    Persist the rate-limit cooldown_until timestamp to MongoDB so it survives
+    Render restarts and process crashes.
+    """
+    db = get_db()
+    if db is None:
+        return False
+    try:
+        from datetime import timezone
+        col = db["rate_limit_state"]
+        col.replace_one(
+            {"_id": "global_rate_limit"},
+            {
+                "_id": "global_rate_limit",
+                "cooldown_until": cooldown_until,
+                "expires_at": datetime.fromtimestamp(cooldown_until) if cooldown_until > 0 else datetime.now(),
+                "updated_at": datetime.now().isoformat()
+            },
+            upsert=True
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save rate limit state to DB: {e}")
+        return False
+
+
+def load_rate_limit_state() -> float:
+    """
+    Load the persisted rate-limit cooldown_until timestamp from MongoDB.
+    Returns 0.0 if no active cooldown or DB unavailable.
+    """
+    db = get_db()
+    if db is None:
+        return 0.0
+    try:
+        col = db["rate_limit_state"]
+        doc = col.find_one({"_id": "global_rate_limit"})
+        if doc:
+            return float(doc.get("cooldown_until", 0.0))
+    except Exception as e:
+        logger.debug(f"Failed to load rate limit state from DB: {e}")
+    return 0.0
+
+
+def save_indices_cache(indices_data: dict) -> bool:
+    """
+    Save market index DataFrames to MongoDB so they survive Render restarts.
+    Replaces the local JSON file approach.
+    indices_data: dict of {name: DataFrame}
+    """
+    import json as _json
+    db = get_db()
+    if db is None:
+        return False
+    try:
+        col = db["indices_cache"]
+        for name, df in indices_data.items():
+            if df is not None and not df.empty:
+                col.replace_one(
+                    {"name": name},
+                    {
+                        "name": name,
+                        "data": df.to_json(orient="split"),
+                        "cached_at": datetime.now(),
+                        "date": str(date.today())
+                    },
+                    upsert=True
+                )
+        logger.info(f"[DB] Saved {len(indices_data)} indices to MongoDB cache.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save indices cache to MongoDB: {e}")
+        return False
+
+
+def load_indices_cache() -> dict:
+    """
+    Load market index DataFrames from MongoDB.
+    Returns dict of {name: DataFrame} — empty dict if unavailable.
+    """
+    import pandas as pd
+    db = get_db()
+    if db is None:
+        return {}
+    try:
+        col = db["indices_cache"]
+        result = {}
+        for doc in col.find({}, {"_id": 0}):
+            name = doc.get("name")
+            data = doc.get("data")
+            if name and data:
+                result[name] = pd.read_json(data, orient="split")
+        if result:
+            logger.info(f"[DB] Loaded {len(result)} indices from MongoDB cache.")
+        return result
+    except Exception as e:
+        logger.error(f"Failed to load indices cache from MongoDB: {e}")
+        return {}
+
+
+def storage_cleanup(keep_technical_days: int = 5, keep_picks_days: int = 90) -> dict:
+    """
+    Manual storage management — prune old records that TTL hasn't expired yet.
+    Keeps DB lean for Render's free-tier MongoDB Atlas (512MB limit).
+    
+    Args:
+        keep_technical_days: Keep technical_cache for last N days (default: 5)
+        keep_picks_days: Keep daily_picks for last N days (default: 90)
+    Returns:
+        Dict of deleted counts per collection.
+    """
+    from datetime import timedelta
+    db = get_db()
+    if db is None:
+        logger.warning("Storage cleanup skipped — MongoDB unavailable.")
+        return {}
+    
+    results = {}
+    cutoffs = {
+        "technical_cache":    datetime.now() - timedelta(days=keep_technical_days),
+        "fundamentals_cache": datetime.now() - timedelta(days=7),
+        "scan_checkpoints":   datetime.now() - timedelta(days=2),
+    }
+    
+    # Date-based cleanup for daily_picks
+    picks_cutoff = (datetime.now() - timedelta(days=keep_picks_days)).strftime("%Y-%m-%d")
+    
+    try:
+        for col_name, cutoff in cutoffs.items():
+            col = db[col_name]
+            field = "_cached_at" if col_name == "fundamentals_cache" else "calculated_at" if col_name == "technical_cache" else "created_at"
+            # Only delete if field is a datetime or ISO string
+            r = col.delete_many({field: {"$lt": cutoff}})
+            results[col_name] = r.deleted_count
+            if r.deleted_count:
+                logger.info(f"[DB CLEANUP] Pruned {r.deleted_count} old records from {col_name}")
+        
+        # Picks cleanup by date string
+        picks_col = db.get_collection("daily_picks") if hasattr(db, 'get_collection') else db["daily_picks"]
+        r = picks_col.delete_many({"date": {"$lt": picks_cutoff}})
+        results["daily_picks"] = r.deleted_count
+        if r.deleted_count:
+            logger.info(f"[DB CLEANUP] Pruned {r.deleted_count} old daily_picks records before {picks_cutoff}")
+        
+        # Log total DB stats
+        try:
+            stats = db.command("dbStats")
+            size_mb = stats.get("dataSize", 0) / (1024 * 1024)
+            logger.info(f"[DB] Total DB size after cleanup: {size_mb:.1f} MB")
+        except Exception:
+            pass
+            
+    except Exception as e:
+        logger.error(f"Storage cleanup failed: {e}")
+    
+    return results
+
+
+def get_db_stats() -> dict:
+    """Return MongoDB storage stats — useful for monitoring on Render."""
+    db = get_db()
+    if db is None:
+        return {"available": False}
+    try:
+        stats = db.command("dbStats")
+        collections = {}
+        for col_name in ["technical_cache", "fundamentals_cache", "daily_picks", 
+                         "scan_checkpoints", "indices_cache", "rate_limit_state"]:
+            try:
+                col_stats = db.command("collStats", col_name)
+                collections[col_name] = {
+                    "count": col_stats.get("count", 0),
+                    "size_kb": round(col_stats.get("size", 0) / 1024, 1)
+                }
+            except Exception:
+                collections[col_name] = {"count": 0, "size_kb": 0}
+        return {
+            "available": True,
+            "total_size_mb": round(stats.get("dataSize", 0) / (1024 * 1024), 2),
+            "storage_size_mb": round(stats.get("storageSize", 0) / (1024 * 1024), 2),
+            "collections": collections
+        }
+    except Exception as e:
+        return {"available": False, "error": str(e)}
