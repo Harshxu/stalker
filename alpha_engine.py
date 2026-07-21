@@ -267,11 +267,24 @@ def compute_ensemble_alpha(
     inst_score, inst_inputs = score_institutional(indic, vol_p, cmf_p)
     cat_score, cat_inputs = score_catalyst(fund, news, earn_surprise_p, earn_revision_p, profit_growth_p)
 
-    # Get regime-specific ensemble weights
+    # Get ensemble weights — ADAPTIVE ENGINE (v2) with static fallback
+    weights = None
+    weights_source = "static"
     try:
-        weights = config.ENSEMBLE_WEIGHTS.get(regime, config.ENSEMBLE_WEIGHTS["Neutral_Rotation"])
-    except Exception:
-        weights = {"momentum": 0.35, "quality": 0.25, "institutional": 0.25, "catalyst": 0.15}
+        from stalker.learning.adaptive_weights import get_engine
+        adaptive_engine = get_engine()
+        if adaptive_engine.is_active:
+            weights = adaptive_engine.get_weights_for_regime(regime)
+            weights_source = "adaptive"
+            logger.debug(f"[ALPHA] Using ADAPTIVE weights for {symbol} in {regime}")
+    except Exception as e:
+        logger.debug(f"[ALPHA] Adaptive engine unavailable ({e}) — using static weights")
+
+    if weights is None:
+        try:
+            weights = config.ENSEMBLE_WEIGHTS.get(regime, config.ENSEMBLE_WEIGHTS["Neutral_Rotation"])
+        except Exception:
+            weights = {"momentum": 0.35, "quality": 0.25, "institutional": 0.25, "catalyst": 0.15}
 
     w_mom = weights["momentum"]
     w_qual = weights["quality"]
@@ -301,6 +314,7 @@ def compute_ensemble_alpha(
         "institutional_score": inst_score,
         "catalyst_score": cat_score,
         "regime_weights": weights,
+        "weights_source": weights_source,
         "sub_model_inputs": {
             "momentum": mom_inputs,
             "quality": qual_inputs,

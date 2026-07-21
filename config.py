@@ -252,15 +252,15 @@ STRATEGY_FALLBACK = {
 # Minimum alpha required per setup type before a BUY is confirmed
 # Based on actual performance — worse-performing setups need higher conviction
 SETUP_MIN_ALPHA = {
-    "VALUE_MOMENTUM":        46.0,  # Best setup (75% WR, +0.25%) — lowest bar
-    "INSTITUTIONAL_BREAKOUT": 48.0, # New strategy replacing MOMENTUM — fresh signal required
-    "VWAP_RECLAIM":           50.0, # Replacing PULLBACK — needs clean VWAP flip
-    "QUALITY_TREND":          50.0, # Replacing EARNINGS_RUNNER — needs fundamental conviction
-    "BREAKOUT":               52.0, # Limited data (1 trade) — needs volume confirmation
-    "PULLBACK":               55.0, # Historical -0.39% — needs high conviction
-    "EARNINGS_RUNNER":        60.0, # Historical -0.24% — must be high confidence only
-    "MOMENTUM":               65.0, # Worst performer (-0.54%) — hardest bar to pass
-    "WATCHLIST_ONLY":         70.0, # Not a buy setup — almost never passes
+    "VALUE_MOMENTUM":        44.0,  # Best setup (75% WR, +0.25%) — lowest bar
+    "INSTITUTIONAL_BREAKOUT": 45.0, # Replacing MOMENTUM — institutional IC is +0.34
+    "VWAP_RECLAIM":           47.0, # Replacing PULLBACK — clean VWAP flip signal
+    "QUALITY_TREND":          47.0, # Replacing EARNINGS_RUNNER — fundamental conviction
+    "BREAKOUT":               48.0, # Limited data — needs volume confirmation
+    "PULLBACK":               50.0, # Historical -0.39% — still cautious
+    "EARNINGS_RUNNER":        55.0, # Historical -0.24% — high confidence only
+    "MOMENTUM":               58.0, # Worst performer (-0.54%) — hardest bar
+    "WATCHLIST_ONLY":         65.0, # Not a buy setup — almost never passes
 }
 
 # ─────────────────────────────────────────────

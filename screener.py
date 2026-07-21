@@ -1681,17 +1681,17 @@ def run_screen(symbols: Optional[List[str]] = None,
             rank_in_universe = idx + 1
             adj_alpha = stock["adjusted_alpha"]
 
-            # Dual quality-percentile filters (intraday-calibrated thresholds)
+            # Dual quality-percentile filters (relaxed to reduce redundant stacked gating)
             passes_dual_filter = False
             if market_regime_legacy == "Bull":
-                # Bull: alpha >= 52, top 35% of universe
-                passes_dual_filter = (adj_alpha >= 52.0) and (rank_in_universe <= max(5, int(0.35 * N)))
+                # Bull: alpha >= 48, top 40% of universe
+                passes_dual_filter = (adj_alpha >= 48.0) and (rank_in_universe <= max(5, int(0.40 * N)))
             elif market_regime_legacy in ["Improving", "Neutral"]:
-                # Neutral: alpha >= 48, top 25% of universe
-                passes_dual_filter = (adj_alpha >= 48.0) and (rank_in_universe <= max(3, int(0.25 * N)))
+                # Neutral: alpha >= 44, top 30% of universe
+                passes_dual_filter = (adj_alpha >= 44.0) and (rank_in_universe <= max(3, int(0.30 * N)))
             else:  # Bear or Deteriorating
-                # Bear: keep strict — only the very best 2 picks
-                passes_dual_filter = (adj_alpha >= 50.0) and (rank_in_universe <= 2)
+                # Bear: cautious but not impossibly strict — top 5 picks
+                passes_dual_filter = (adj_alpha >= 48.0) and (rank_in_universe <= 5)
 
             # Calculate SL and Targets
             entry_price = stock["current_price"]
@@ -1699,23 +1699,44 @@ def run_screen(symbols: Optional[List[str]] = None,
             targets_dict = rm.calculate_targets(entry_price, sl_price)
             rr_ratio_val = targets_dict.get("rr_ratio")
             
-            is_confirmed = passes_dual_filter and (rr_ratio_val is not None and rr_ratio_val >= 1.2)
-
             # Setup-specific alpha minimum gate
             # Failing setups need higher conviction score to get a BUY
             trade_type_for_gate = stock.get("trade_type", "WATCHLIST_ONLY")
-            # Use effective_trade_type from meta model if strategy was replaced
             meta_info_gate = stock.get("meta_info", {})
-            if meta_info_gate.get("is_degraded") and meta_info_gate.get("effective_trade_type"):
-                trade_type_for_gate = meta_info_gate["effective_trade_type"]
-            setup_min_alpha_map = getattr(config, "SETUP_MIN_ALPHA", {})
-            setup_min_alpha = setup_min_alpha_map.get(trade_type_for_gate, 50.0)
-            if is_confirmed and adj_alpha < setup_min_alpha:
+            
+            # If Strategy Tracker disabled this setup, downgrade to WATCH immediately
+            if meta_info_gate.get("tracker_disabled"):
                 is_confirmed = False
                 logger.debug(
                     f"[SETUP_GATE] {stock['symbol']} ({trade_type_for_gate}): "
-                    f"alpha {adj_alpha:.1f} < min {setup_min_alpha:.0f} — downgraded to WATCH"
+                    f"DISABLED by StrategyTracker — downgraded to WATCH"
                 )
+            else:
+                # Use effective_trade_type from meta model if strategy was replaced
+                if meta_info_gate.get("is_degraded") and meta_info_gate.get("effective_trade_type"):
+                    trade_type_for_gate = meta_info_gate["effective_trade_type"]
+                setup_min_alpha_map = getattr(config, "SETUP_MIN_ALPHA", {})
+                setup_min_alpha = setup_min_alpha_map.get(trade_type_for_gate, 50.0)
+                
+                # Multi-condition dynamic BUY gating
+                confidence = meta_info_gate.get("tracker_confidence", 50.0)
+                volume_confirmed = float(stock["indic"].get("volume_ratio", 1.0)) >= getattr(config, "MIN_BUY_VOLUME_RATIO", 1.1)
+                
+                is_confirmed = (
+                    passes_dual_filter and 
+                    (rr_ratio_val is not None and rr_ratio_val >= 1.2) and
+                    (adj_alpha >= setup_min_alpha) and
+                    (confidence >= getattr(config, "MIN_BUY_CONFIDENCE", 70.0)) and
+                    volume_confirmed
+                )
+                
+                if passes_dual_filter and not is_confirmed:
+                    logger.debug(
+                        f"[SETUP_GATE] {stock['symbol']} ({trade_type_for_gate}): "
+                        f"alpha={adj_alpha:.1f} (min {setup_min_alpha:.0f}), "
+                        f"conf={confidence:.0f} (min {getattr(config, 'MIN_BUY_CONFIDENCE', 70.0)}), "
+                        f"vol={volume_confirmed} — downgraded to WATCH"
+                    )
 
             # Drawdown halt overrides BUY
             if not dd_risk["allowed"]:
@@ -1725,11 +1746,11 @@ def run_screen(symbols: Optional[List[str]] = None,
             # If STRICT_BULL_ONLY_BUY is True, we block all buys outside of Bull trends.
             if getattr(config, "STRICT_BULL_ONLY_BUY", False) and not market_is_bullish:
                 is_confirmed = False
-            # If in Bear_Trend or Bear_Panic (buying_permitted is False), we only allow buying
-            # for truly elite, high-conviction leadership candidates to protect capital.
+            # If in Bear_Trend or Bear_Panic (buying_permitted is False), we allow buying
+            # for high-conviction leadership candidates to protect capital while not blocking everything.
             elif not buying_permitted:
                 minervini_tier = stock.get("minervini_tier", "Reject")
-                passes_elite_bear_gating = (adj_alpha >= 72.0) and (minervini_tier in ["Elite", "Strong"])
+                passes_elite_bear_gating = (adj_alpha >= 60.0) and (minervini_tier in ["Elite", "Strong", "Qualified"])
                 if not passes_elite_bear_gating:
                     is_confirmed = False
 
@@ -1752,9 +1773,9 @@ def run_screen(symbols: Optional[List[str]] = None,
                 action_color = "yellow"
                 stock["execution_rule"] = "Kill Switch Active — Strict Watchlist Only."
             elif downgrade_buy and action_val == "BUY":
-                # Pulse downgrade: only block weaker setups (alpha < 60) in clearly weak markets
-                # Stocks with alpha >= 60 with confirmed momentum should still trigger BUY
-                if adj_alpha < 60.0:
+                # Pulse downgrade: only block in genuine crash conditions (pulse < 25)
+                # Stocks with alpha >= 55 with confirmed momentum should still trigger BUY
+                if adj_alpha < 55.0:
                     action_val = "WATCH"
                     action_color = "yellow"
                     stock["execution_rule"] = f"Pulse Gate: Sellers dominant today (Pulse={pulse_score:.0f}/100). Wait for buyer confirmation."

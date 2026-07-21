@@ -192,11 +192,11 @@ def adjust_alpha(
     """
     Applies a meta-model adjustment to the raw alpha score.
 
-    v2.0 changes:
-    - Stronger penalty (-25 pts, was -15)
-    - Checks avg return quality in addition to win rate
-    - Detects strategy degradation over last 3-6 days
-    - Auto-replaces degraded setup with fresh strategy label
+    v2.1 changes (Strategy Tracker integration):
+    - Checks StrategyTracker for disabled setups first
+    - Uses tracker confidence to modulate bonus/penalty
+    - Disabled setups get -30 pt penalty + replacement label
+    - Falls back to v2.0 degradation check if tracker unavailable
 
     Args:
         alpha:          Raw alpha from alpha_engine (0-100)
@@ -215,36 +215,89 @@ def adjust_alpha(
     adjustment = 0.0
     meta_signal = "neutral"
     effective_trade_type = trade_type
+    tracker_confidence = 50.0
+    tracker_disabled = False
 
-    # ── Step 1: Check strategy degradation (3-6 day consecutive negative) ─
+    # ── Step 0: Check Strategy Tracker (v2.1) ─────────────────────────
+    try:
+        from stalker.learning.strategy_tracker import get_tracker
+        tracker = get_tracker()
+
+        if not tracker.is_allowed(trade_type):
+            # Setup is DISABLED by the tracker
+            tracker_disabled = True
+            tracker_confidence = tracker.get_confidence(trade_type)
+            stats = tracker.get_stats(trade_type)
+
+            # Try to find a replacement from fallback map
+            try:
+                import config
+                fallback_map = getattr(config, "STRATEGY_FALLBACK", {})
+                replacement = fallback_map.get(trade_type)
+                if replacement:
+                    effective_trade_type = replacement
+            except Exception:
+                replacement = None
+
+            adjustment = -30.0
+            meta_signal = f"tracker_disabled→{effective_trade_type}" if effective_trade_type != trade_type else "tracker_disabled"
+            logger.warning(
+                f"[META] {trade_type} DISABLED by StrategyTracker "
+                f"(WR={stats.win_rate:.0%}, Exp={stats.expectancy:+.2f}%, "
+                f"Conf={tracker_confidence:.0f}/100). "
+                f"Penalty: {adjustment:+.0f}pt"
+                + (f", replacing with: {effective_trade_type}" if effective_trade_type != trade_type else "")
+            )
+
+            adjusted_alpha = round(min(100.0, max(0.0, alpha + adjustment)), 2)
+            return adjusted_alpha, {
+                "meta_signal":          meta_signal,
+                "setup_win_rate":       round(win_rate * 100.0, 1),
+                "setup_avg_return":     round(avg_return, 3),
+                "setup_n_trades":       n_trades,
+                "meta_adjustment_pts":  adjustment,
+                "trade_type":           trade_type,
+                "effective_trade_type": effective_trade_type,
+                "is_degraded":          True,
+                "tracker_disabled":     True,
+                "tracker_confidence":   round(tracker_confidence, 1),
+                "consecutive_neg_days": 0,
+                "regime":               regime_legacy,
+            }
+        else:
+            tracker_confidence = tracker.get_confidence(trade_type)
+    except Exception as e:
+        logger.debug(f"[META] StrategyTracker unavailable ({e}) — using v2.0 degradation check")
+
+    # ── Step 1: Check strategy degradation (v2.0 fallback) ─────────────
     degradation = check_strategy_degradation(trade_type)
     if degradation["is_degraded"] and degradation["replacement_strategy"]:
         effective_trade_type = degradation["replacement_strategy"]
         meta_signal = f"degraded→replaced:{effective_trade_type}"
-        # Apply a penalty to push this stock toward replacement-strategy scoring
         adjustment = -20.0
         logger.info(
             f"[META] {trade_type} → REPLACED by {effective_trade_type} "
             f"({degradation['consecutive_negative_days']}d negative streak)"
         )
     elif n_trades < MIN_SAMPLE_SIZE:
-        # Not enough data — don't touch the alpha
         meta_signal = "insufficient_data"
     elif win_rate < PENALTY_THRESHOLD_WINRATE or avg_return < PENALTY_THRESHOLD_RETURN:
-        # Underperforming on win rate OR return quality
-        adjustment = PENALTY_PTS
+        # Modulate penalty by tracker confidence
+        confidence_factor = max(0.5, (100.0 - tracker_confidence) / 100.0)
+        adjustment = PENALTY_PTS * confidence_factor
         meta_signal = "underperforming"
         logger.info(
             f"[META] {trade_type}: WR={win_rate:.0%}, AvgRet={avg_return:.2f}% "
-            f"in {n_trades} trades → penalty {adjustment:+.0f}pt"
+            f"in {n_trades} trades, Conf={tracker_confidence:.0f} → penalty {adjustment:+.1f}pt"
         )
     elif win_rate > BONUS_THRESHOLD and avg_return > 0:
-        # Genuinely outperforming on BOTH win rate and positive returns
-        adjustment = BONUS_PTS
+        # Modulate bonus by tracker confidence
+        confidence_factor = min(1.5, tracker_confidence / 100.0 + 0.5)
+        adjustment = BONUS_PTS * confidence_factor
         meta_signal = "outperforming"
         logger.info(
             f"[META] {trade_type}: WR={win_rate:.0%}, AvgRet={avg_return:.2f}% "
-            f"in {n_trades} trades → bonus {adjustment:+.0f}pt"
+            f"in {n_trades} trades, Conf={tracker_confidence:.0f} → bonus {adjustment:+.1f}pt"
         )
 
     adjusted_alpha = round(min(100.0, max(0.0, alpha + adjustment)), 2)
@@ -258,6 +311,10 @@ def adjust_alpha(
         "trade_type":           trade_type,
         "effective_trade_type": effective_trade_type,
         "is_degraded":          degradation["is_degraded"],
+        "tracker_disabled":     tracker_disabled,
+        "tracker_confidence":   round(tracker_confidence, 1),
         "consecutive_neg_days": degradation["consecutive_negative_days"],
         "regime":               regime_legacy,
     }
+
+

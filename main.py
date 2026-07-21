@@ -807,11 +807,35 @@ def generate_eod_report():
             hot_pnl = avg_ret
             hot_sector = sec
 
+    # 7. Separate BUY vs WATCH performance statistics
+    buy_results = [p for p in pnl_results if p.get("action") == "BUY"]
+    watch_results = [p for p in pnl_results if p.get("action") != "BUY"]
+
+    def _calc_group_stats(group, label):
+        """Calculate win/loss/avg stats for a group of picks."""
+        if not group:
+            return {"label": label, "count": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "avg_pnl": 0.0, "total_pnl_rupees": 0.0}
+        g_wins = sum(1 for p in group if (p.get("pnl_pct") or 0) > 0)
+        g_losses = sum(1 for p in group if (p.get("pnl_pct") or 0) < 0)
+        g_total = g_wins + g_losses
+        g_wr = (g_wins / g_total * 100) if g_total > 0 else 0.0
+        g_avg = (sum(p.get("pnl_pct", 0) for p in group) / len(group)) if group else 0.0
+        g_rupees = sum(p.get("pnl_rupees", 0) for p in group)
+        return {
+            "label": label, "count": len(group), "wins": g_wins, "losses": g_losses,
+            "win_rate": round(g_wr, 1), "avg_pnl": round(g_avg, 2), "total_pnl_rupees": round(g_rupees, 2)
+        }
+
+    buy_performance = _calc_group_stats(buy_results, "BUY (Traded)")
+    watch_performance = _calc_group_stats(watch_results, "WATCH (Simulated)")
+
     # Save EOD report data
     eod_data = {
         "date":                  today,
         "picks":                 pnl_results,
         "performance":           perf,
+        "buy_performance":       buy_performance,
+        "watch_performance":     watch_performance,
         "market":                today_picks.get("market_trend"),
         "nifty_chg_pct":         round(nifty_chg_pct, 2),
         "pct_above_open":        round(pct_above_open, 1),
@@ -834,6 +858,19 @@ def generate_eod_report():
         _send_email_report(eod_data)
 
         logger.info("EOD report generated successfully.")
+
+        # STALKER v2 — EOD Learning Loop
+        try:
+            logger.info("[LEARNING] Running EOD Adaptive Learning Loop...")
+            from stalker.learning.adaptive_weights import get_engine
+            engine = get_engine()
+            engine.update_weights_eod()
+            
+            from stalker.learning.strategy_tracker import get_tracker
+            tracker = get_tracker()
+            tracker.update_all_stats_eod()
+        except Exception as learn_err:
+            logger.error(f"[LEARNING] Failed to execute EOD learning loop: {learn_err}")
 
         # Trigger private EOD mistakes audit report strictly to the owner (harshkumawat9950@gmail.com)
         try:
@@ -1448,19 +1485,33 @@ def _open_dashboard():
 
 
 def _send_email_report(eod_data: Dict):
-    """Send EOD report via Brevo REST API over HTTPS."""
+    """Send EOD report via Brevo REST API over HTTPS. Separates BUY and WATCH picks visually."""
     try:
         date_str = eod_data.get("date", "today")
         picks = eod_data.get("picks", [])
         
-        # Calculate base statistics
-        wins = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
-        losses = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
-        total_executed = wins + losses
-        today_win_rate = (wins / total_executed) * 100 if total_executed > 0 else 0.0
+        # Split picks into BUY (traded) and WATCH (simulated)
+        buy_picks = [p for p in picks if p.get("action") == "BUY"]
+        watch_picks = [p for p in picks if p.get("action") != "BUY"]
+        has_buy_picks = len(buy_picks) > 0
         
-        executed_picks = [p for p in picks if p.get("pnl_pct") is not None]
-        today_avg_pnl = (sum(p.get("pnl_pct") for p in executed_picks) / len(executed_picks)) if executed_picks else 0.0
+        # Headline stats: use BUY picks only for "Today's" metrics
+        if has_buy_picks:
+            buy_wins = sum(1 for p in buy_picks if (p.get("pnl_pct") or 0) > 0)
+            buy_losses = sum(1 for p in buy_picks if (p.get("pnl_pct") or 0) < 0)
+            buy_total = buy_wins + buy_losses
+            today_win_rate = (buy_wins / buy_total * 100) if buy_total > 0 else 0.0
+            today_avg_pnl = (sum(p.get("pnl_pct", 0) for p in buy_picks) / len(buy_picks))
+            wins = buy_wins
+            losses = buy_losses
+        else:
+            # Fallback: show all picks stats but label them as simulated
+            wins = sum(1 for p in picks if (p.get("pnl_pct") or 0) > 0)
+            losses = sum(1 for p in picks if (p.get("pnl_pct") or 0) < 0)
+            total_executed = wins + losses
+            today_win_rate = (wins / total_executed * 100) if total_executed > 0 else 0.0
+            today_avg_pnl = (sum(p.get("pnl_pct", 0) for p in picks) / len(picks)) if picks else 0.0
+
         today_pnl_color = "#16a34a" if today_avg_pnl >= 0 else "#dc2626"
         
         perf = eod_data.get("performance", {})
@@ -1469,90 +1520,112 @@ def _send_email_report(eod_data: Dict):
         
         is_test = eod_data.get("is_test", False)
         subject_prefix = "⚠️ [TEST / SIMULATED] " if is_test else ""
+        headline_tag = "BUY Picks" if has_buy_picks else "All Picks (Simulated)"
         subject = f"{subject_prefix}📊 STALKER EOD Report — {date_str} | WR: {matured_win_rate:.1f}% | Today: {today_avg_pnl:+.2f}%"
 
-        # ── Sector Grouping & Performance Audit ───────────────────────
-        sectors = {}
-        for p in picks:
-            sec = p.get("sector", "Other") or "Other"
-            if sec not in sectors:
-                sectors[sec] = []
-            sectors[sec].append(p)
+        # ── Helper: Build sector-grouped table HTML for a list of picks ──────
+        def _build_grouped_tables(pick_list, section_type="BUY"):
+            """Build sector-grouped tables HTML for a set of picks."""
+            sectors = {}
+            for p in pick_list:
+                sec = p.get("sector", "Other") or "Other"
+                if sec not in sectors:
+                    sectors[sec] = []
+                sectors[sec].append(p)
             
-        # Grouped tables HTML assembly
-        grouped_tables_html = ""
-        for sec, sec_picks in sectors.items():
-            avg_sec_pnl = sum(p.get("pnl_pct", 0) for p in sec_picks) / len(sec_picks)
-            sec_pnl_color = "#16a34a" if avg_sec_pnl >= 0 else "#dc2626"
-            
-            rows_html = ""
-            for i, p in enumerate(sec_picks, 1):
-                name = p.get('name', '')
-                action = p.get('action', '')
-                action_color = "#16a34a" if action == "BUY" else "#d97706"
-                action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
+            tables_html = ""
+            for sec, sec_picks in sectors.items():
+                avg_sec_pnl = sum(p.get("pnl_pct", 0) for p in sec_picks) / len(sec_picks)
+                sec_pnl_color = "#16a34a" if avg_sec_pnl >= 0 else "#dc2626"
                 
-                open_p = p.get("open") if p.get("open") is not None else 0.0
-                close_p = p.get("close") if p.get("close") is not None else 0.0
-                high_p = p.get("high") if p.get("high") is not None else 0.0
-                low_p = p.get("low") if p.get("low") is not None else 0.0
-                vwap_p = p.get("vwap") if p.get("vwap") is not None else 0.0
-                vwap_trend = p.get("vwap_trend", "NEUTRAL")
-                rel_strength = p.get("rel_strength") if p.get("rel_strength") is not None else 0.0
-                m_score = p.get("momentum_score") if p.get("momentum_score") is not None else 5.0
+                rows_html = ""
+                for i, p in enumerate(sec_picks, 1):
+                    name = p.get('name', '')
+                    action = p.get('action', '')
+                    action_color = "#16a34a" if action == "BUY" else "#d97706"
+                    action_bg = "#f0fdf4" if action == "BUY" else "#fffbeb"
+                    
+                    open_p = p.get("open") if p.get("open") is not None else 0.0
+                    close_p = p.get("close") if p.get("close") is not None else 0.0
+                    vwap_p = p.get("vwap") if p.get("vwap") is not None else 0.0
+                    vwap_trend = p.get("vwap_trend", "NEUTRAL")
+                    rel_strength = p.get("rel_strength") if p.get("rel_strength") is not None else 0.0
+                    m_score = p.get("momentum_score") if p.get("momentum_score") is not None else 5.0
+                    
+                    pnl = p.get("pnl_pct")
+                    pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
+                    pnl_color = "#16a34a" if (pnl or 0) > 0 else "#dc2626" if (pnl or 0) < 0 else "#6b7280"
+                    pnl_font_weight = "bold" if pnl is not None else "normal"
+                    
+                    vwap_trend_color = "#16a34a" if vwap_trend == "BULLISH" else "#dc2626"
+                    rel_strength_color = "#16a34a" if rel_strength >= 0 else "#dc2626"
+                    m_score_color = "#16a34a" if m_score >= 7.5 else "#d97706" if m_score >= 5.0 else "#dc2626"
+                    
+                    rows_html += f"""
+                    <tr style="border-bottom: 1px solid #e5e7eb;">
+                        <td class="stock-name-cell" style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{name}</td>
+                        <td data-label="Type" style="padding: 12px 8px; text-align: center;">
+                            <span style="display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
+                                {action}
+                            </span>
+                        </td>
+                        <td data-label="Open" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
+                        <td data-label="Close" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
+                        <td data-label="Intraday VWAP" style="padding: 12px 8px; text-align: right; color: {vwap_trend_color}; font-size: 12px; font-weight: 500;">
+                            ₹{vwap_p:,.2f}<br/><span style="font-size: 9px;">({vwap_trend})</span>
+                        </td>
+                        <td data-label="Nifty RS" style="padding: 12px 8px; text-align: right; color: {rel_strength_color}; font-weight: 500;">{rel_strength:+.2f}%</td>
+                        <td data-label="P&L %" style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
+                        <td data-label="Momentum" style="padding: 12px 8px; text-align: center; color: {m_score_color}; font-weight: bold; font-size: 14px;">{m_score:.1f}<span style="font-size: 9px; color: #9ca3af;">/10</span></td>
+                    </tr>
+                    """
+                    
+                # Border color: green for BUY section, grey for WATCH
+                border_color = "#bbf7d0" if section_type == "BUY" else "#e2e8f0"
+                header_bg = "#f0fdf4" if section_type == "BUY" else "#f8fafc"
                 
-                pnl = p.get("pnl_pct")
-                pnl_str = f"{pnl:+.2f}%" if pnl is not None else "Pending"
-                pnl_color = "#16a34a" if (pnl or 0) > 0 else "#dc2626" if (pnl or 0) < 0 else "#6b7280"
-                pnl_font_weight = "bold" if pnl is not None else "normal"
-                
-                vwap_trend_color = "#16a34a" if vwap_trend == "BULLISH" else "#dc2626"
-                rel_strength_color = "#16a34a" if rel_strength >= 0 else "#dc2626"
-                m_score_color = "#16a34a" if m_score >= 7.5 else "#d97706" if m_score >= 5.0 else "#dc2626"
-                
-                rows_html += f"""
-                <tr style="border-bottom: 1px solid #e5e7eb;">
-                    <td class="stock-name-cell" style="padding: 12px 8px; font-weight: bold; color: #1f2937;">{name}</td>
-                    <td data-label="Type" style="padding: 12px 8px; text-align: center;">
-                        <span style="display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 10px; font-weight: bold; background-color: {action_bg}; color: {action_color};">
-                            {action}
-                        </span>
-                    </td>
-                    <td data-label="Open" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{open_p:,.2f}</td>
-                    <td data-label="Close" style="padding: 12px 8px; text-align: right; color: #4b5563;">₹{close_p:,.2f}</td>
-                    <td data-label="Intraday VWAP" style="padding: 12px 8px; text-align: right; color: {vwap_trend_color}; font-size: 12px; font-weight: 500;">
-                        ₹{vwap_p:,.2f}<br/><span style="font-size: 9px;">({vwap_trend})</span>
-                    </td>
-                    <td data-label="Nifty RS" style="padding: 12px 8px; text-align: right; color: {rel_strength_color}; font-weight: 500;">{rel_strength:+.2f}%</td>
-                    <td data-label="P&L %" style="padding: 12px 8px; text-align: right; color: {pnl_color}; font-weight: {pnl_font_weight};">{pnl_str}</td>
-                    <td data-label="Momentum" style="padding: 12px 8px; text-align: center; color: {m_score_color}; font-weight: bold; font-size: 14px;">{m_score:.1f}<span style="font-size: 9px; color: #9ca3af;">/10</span></td>
-                </tr>
-                """
-                
-            grouped_tables_html += f"""
-            <div style="margin-bottom: 30px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
-                <div style="background-color: #f8fafc; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;" class="mobile-flex-row">
-                    <span style="font-weight: 800; color: #1e293b; font-size: 14px;">📂 Sector: {sec}</span>
-                    <span style="font-weight: bold; color: {sec_pnl_color}; font-size: 13px;" class="mobile-text-right">Avg Return: {avg_sec_pnl:+.2f}%</span>
+                tables_html += f"""
+                <div style="margin-bottom: 30px; border: 1px solid {border_color}; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
+                    <div style="background-color: {header_bg}; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #e5e7eb;" class="mobile-flex-row">
+                        <span style="font-weight: 800; color: #1e293b; font-size: 14px;">📂 Sector: {sec}</span>
+                        <span style="font-weight: bold; color: {sec_pnl_color}; font-size: 13px;" class="mobile-text-right">Avg Return: {avg_sec_pnl:+.2f}%</span>
+                    </div>
+                    <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;">
+                        <table class="responsive-table" style="width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4;">
+                            <thead>
+                                <tr style="background-color: #fafafa; border-bottom: 1px solid #e5e7eb; color: #64748b; font-weight: bold; font-size: 11px;">
+                                    <th style="padding: 8px; text-align: left;">Stock</th>
+                                    <th style="padding: 8px; text-align: center;">Type</th>
+                                    <th style="padding: 8px; text-align: right;">Open</th>
+                                    <th style="padding: 8px; text-align: right;">Close</th>
+                                    <th style="padding: 8px; text-align: right;">Intraday VWAP</th>
+                                    <th style="padding: 8px; text-align: right;">Nifty RS</th>
+                                    <th style="padding: 8px; text-align: right;">P&L %</th>
+                                    <th style="padding: 8px; text-align: center;">Momentum</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rows_html}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-                <div style="width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch;">
-                    <table class="responsive-table" style="width: 100%; border-collapse: collapse; font-size: 12px; line-height: 1.4;">
-                        <thead>
-                            <tr style="background-color: #fafafa; border-bottom: 1px solid #e5e7eb; color: #64748b; font-weight: bold; font-size: 11px;">
-                                <th style="padding: 8px; text-align: left;">Stock</th>
-                                <th style="padding: 8px; text-align: center;">Type</th>
-                                <th style="padding: 8px; text-align: right;">Open</th>
-                                <th style="padding: 8px; text-align: right;">Close</th>
-                                <th style="padding: 8px; text-align: right;">Intraday VWAP</th>
-                                <th style="padding: 8px; text-align: right;">Nifty RS</th>
-                                <th style="padding: 8px; text-align: right;">P&L %</th>
-                                <th style="padding: 8px; text-align: center;">Momentum</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {rows_html}
-                        </tbody>
-                    </table>
+                """
+            
+            return tables_html
+
+        buy_tables_html = _build_grouped_tables(buy_picks, "BUY") if has_buy_picks else ""
+        watch_tables_html = _build_grouped_tables(watch_picks, "WATCH") if watch_picks else ""
+
+        # ── No BUY Signals Banner ──────────────────────────────────────────
+        no_buy_banner_html = ""
+        if not has_buy_picks:
+            no_buy_banner_html = """
+            <div style="background-color: #fef3c7; border: 2px solid #f59e0b; padding: 16px 20px; margin-bottom: 25px; border-radius: 10px; text-align: center;">
+                <div style="font-size: 16px; font-weight: 800; color: #92400e; margin-bottom: 6px;">⚠️ No BUY Signals Today</div>
+                <div style="font-size: 12px; color: #a16207; line-height: 1.5;">
+                    All picks are <strong>Watch Only</strong> — the system did not find high-conviction trade setups today.<br/>
+                    The P&L shown below is <strong>simulated</strong> (open-to-close tracking). No actual trades were triggered.
                 </div>
             </div>
             """
@@ -1572,6 +1645,50 @@ def _send_email_report(eod_data: Dict):
         hot_sector = eod_data.get("hot_sector", "None")
         hot_pnl = eod_data.get("hot_sector_pnl", 0.0)
         hot_pnl_color = "#16a34a" if hot_pnl >= 0 else "#dc2626"
+
+        # ── BUY Section Header ──────────────────────────────────────────
+        buy_section_html = ""
+        if has_buy_picks:
+            buy_section_html = f"""
+                    <!-- BUY Picks Section -->
+                    <div style="border: 2px solid #16a34a; border-radius: 12px; padding: 0; margin-bottom: 30px; overflow: hidden;">
+                        <div style="background: linear-gradient(135deg, #065f46, #059669); padding: 14px 20px; text-align: center;">
+                            <h3 style="margin: 0; color: #ffffff; font-weight: 800; font-size: 16px; letter-spacing: 0.3px;">
+                                ✅ BUY Picks — Your Active Trades ({len(buy_picks)} stocks)
+                            </h3>
+                            <p style="margin: 4px 0 0 0; color: #d1fae5; font-size: 11px;">
+                                These are confirmed trade signals. P&L reflects actual open-to-close performance.
+                            </p>
+                        </div>
+                        <div style="padding: 16px;">
+                            {buy_tables_html}
+                        </div>
+                    </div>
+            """
+
+        # ── WATCH Section Header ──────────────────────────────────────────
+        watch_section_html = ""
+        if watch_picks:
+            watch_section_html = f"""
+                    <!-- WATCH Picks Section (Simulated) -->
+                    <div style="border: 1px solid #d1d5db; border-radius: 12px; padding: 0; margin-bottom: 30px; overflow: hidden; opacity: 0.85;">
+                        <div style="background-color: #f1f5f9; padding: 14px 20px; text-align: center; border-bottom: 1px solid #e2e8f0;">
+                            <h3 style="margin: 0; color: #64748b; font-weight: 800; font-size: 14px;">
+                                📋 Watchlist Monitoring — {len(watch_picks)} Stocks
+                            </h3>
+                            <p style="margin: 4px 0 0 0; color: #94a3b8; font-size: 11px; font-style: italic;">
+                                SIMULATED — NOT TRADED. These stocks were monitored but no buy signal was triggered.
+                            </p>
+                        </div>
+                        <div style="padding: 16px; background-color: #fafbfc;">
+                            {watch_tables_html}
+                        </div>
+                    </div>
+            """
+
+        # Stats label changes based on whether BUY picks exist
+        stats_label = "BUY Picks Only" if has_buy_picks else "All Picks (Simulated)"
+        stats_sublabel = "(Confirmed trades)" if has_buy_picks else "(No trades triggered — simulated data)"
 
         html_body = f"""
         <html>
@@ -1687,6 +1804,8 @@ def _send_email_report(eod_data: Dict):
                 
                 <!-- Info Section -->
                 <div style="padding: 24px; background-color: #ffffff;" class="body-padding">
+                    {no_buy_banner_html}
+
                     <!-- Key Cards Row 1 -->
                     <div style="display: flex; gap: 15px; margin-bottom: 15px;" class="mobile-stack">
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
@@ -1697,12 +1816,12 @@ def _send_email_report(eod_data: Dict):
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
                             <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Avg Return</div>
                             <div style="font-size: 20px; font-weight: 800; color: {today_pnl_color};">{today_avg_pnl:+.2f}%</div>
-                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">(Day 1 close vs open)</div>
+                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">{stats_sublabel}</div>
                         </div>
                         <div style="flex: 1; padding: 15px; background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;" class="mobile-card">
                             <div style="font-size: 10px; color: #64748b; font-weight: bold; text-transform: uppercase; margin-bottom: 5px;">Today's Day-1 Close</div>
                             <div style="font-size: 18px; font-weight: 800; color: #475569;">W: <span style="color:#16a34a;">{wins}</span> | L: <span style="color:#dc2626;">{losses}</span></div>
-                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">(Day 1 Win Rate: {today_win_rate:.1f}%)</div>
+                            <div style="font-size: 9px; color: #6b7280; margin-top: 2px;">{stats_label} (WR: {today_win_rate:.1f}%)</div>
                         </div>
                     </div>
 
@@ -1730,10 +1849,11 @@ def _send_email_report(eod_data: Dict):
                         </span>
                     </div>
                     
-                    <!-- Table Title -->
-                    <h3 style="margin: 0 0 16px 0; color: #0f172a; font-weight: 800; font-size: 18px;">📈 Sector Grouped Audit & momentum Details</h3>
-                    
-                    {grouped_tables_html}
+                    <!-- BUY Picks Section -->
+                    {buy_section_html}
+
+                    <!-- WATCH Picks Section -->
+                    {watch_section_html}
                 </div>
                 
                 <!-- Footer -->
